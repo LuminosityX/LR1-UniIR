@@ -12,12 +12,12 @@ def load_yaml(file_path):
     with open(file_path) as f:
         return yaml.safe_load(f)
 
-
+### 将 Python 数据结构回写为 YAML。
 def save_yaml(data, file_path):
     with open(file_path, "w") as f:
         yaml.safe_dump(data, f, default_flow_style=False)
 
-
+### 把内存中的 YAML 数据美化打印到 stdout。
 def print_yaml(data):
     print(yaml.dump(data, default_flow_style=False, sort_keys=False, indent=4))
 
@@ -41,7 +41,7 @@ def update_mbeir_yaml_instruct_status(yaml_file_path, enable_instruct):
     print_yaml(yaml_data)
     save_yaml(yaml_data, yaml_file_path)
 
-
+### 批量更新某配置目录下的嵌入/索引/检索 YAML
 def update_mbeir_config_dir_instruct_status(config_dir, enable_instruct):
     print(f"Updating config dir {config_dir} for instruct status: {enable_instruct}")
 

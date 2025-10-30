@@ -29,6 +29,9 @@ class BLIPFeatureFusion(nn.Module):
         """
         super().__init__()
 
+        ### 构建视觉编码器（ViT，可开启梯度检查点 vit_grad_ckpt 减显存），并取出视觉通道维度 vision_width。
+        # •	初始化文本编码器（BertModel 变体）。encoder_width 告知 cross-attention 对接的视觉嵌入维度。
+        # •	初始化 tokenizer（用于后续 get_tokenizer 包装）。
         self.visual_encoder, vision_width = create_vit(vit, image_size, vit_grad_ckpt, vit_ckpt_layer)
         self.image_size = image_size
         self.tokenizer = init_tokenizer()
@@ -38,6 +41,8 @@ class BLIPFeatureFusion(nn.Module):
         self.text_encoder = BertModel(config=med_config, add_pooling_layer=True)
 
         # create momentum encoders
+        ### 创建动量副本（*_m）：结构相同，但权重由主干 EMA 更新，而非梯度更新。
+	    ### •	用 self.model_pairs 管理参数成对关系；copy_params() 初始将动量权重拷贝为主模型权重，并冻结 requires_grad=False。
         self.visual_encoder_m, vision_width = create_vit(vit, image_size)
         self.text_encoder_m = BertModel(config=med_config, add_pooling_layer=True)
 
@@ -48,6 +53,11 @@ class BLIPFeatureFusion(nn.Module):
         self.copy_params()
 
         # create the queue
+        ### 队列与指针	
+        # •	注册为 buffer（随模型移动与保存，不参与梯度）：
+        # •	query_queue/cand_queue: 存放动量编码器输出的特征（对比库）。
+        # •	idx_queue: 存放候选的标识 id（用于软/硬标签计算）。
+        # •	new_ptr_queue: 循环队列写指针。
         self.register_buffer("query_queue", torch.randn(embed_dim, queue_size))
         self.register_buffer("cand_queue", torch.randn(embed_dim, queue_size))
         self.register_buffer("idx_queue", torch.full((1, queue_size), -100))  # [1, queue_size]
@@ -79,6 +89,7 @@ class BLIPFeatureFusion(nn.Module):
 
         return tokenizer_wrapper
 
+    ### 目标：给一批文本+图像做融合编码，输出池化后的句向量/融合向量。
     def encode_multimodal_input(self, txt_dict_batched, image_batched, txt_mask, img_mask, use_momentum=False):
         """encode multimodal input into embeddings
 
@@ -105,6 +116,7 @@ class BLIPFeatureFusion(nn.Module):
             return fused_emb_m.pooler_output
         else:
             image_embeds = self.visual_encoder(image_batched)
+            ### 构造全 1 的 image_atts（形状与视觉 token 对齐）
             image_atts = torch.ones(image_embeds.size()[:-1], dtype=torch.long).to(image_batched.device)
             fused_emb = self.text_encoder(
                 txt_dict_batched.input_ids,
@@ -116,11 +128,13 @@ class BLIPFeatureFusion(nn.Module):
             return fused_emb.pooler_output
 
     def compute_contrastive_loss(self, batch, alpha):
+        ### 从 collator 读入统一打包后的四类张量（文本/图像及其“是否存在”的 mask）。如上所述，后两者当前未显式使用。
         txt_dict_batched = batch["txt_batched"]
         image_batched = batch["image_batched"]
         txt_mask_batched = batch["txt_mask_batched"]
         image_mask_batched = batch["image_mask_batched"]
 
+        ### pc_idx：正例的候选标识（did 的哈希），用于构造软/硬标签。
         pc_idx = torch.tensor(batch["p_did_list"])  # shape: [batch_size]
         index_mapping = batch["index_mapping"]
         enable_hard_neg = "neg_cand_list" in index_mapping
@@ -129,10 +143,12 @@ class BLIPFeatureFusion(nn.Module):
             nc_idx = nc_idx.view(-1, 1)  # shape: [batch_size * neg_num, 1]
             hard_nc_num = nc_idx.size(0)  # batch_size * neg_num
 
+        ### 训练中不断将可学习温度裁剪在 [1e-3, 0.5] 范围
         with torch.no_grad():
             self.temp.clamp_(0.001, 0.5)
 
         # compute embeddings
+        ### 主干编码，得到融合嵌入，形状 [N, embed_dim]，注意 N 是 “query + pos + neg“ 的总扁平条数。
         embeddings = self.encode_multimodal_input(
             txt_dict_batched,
             image_batched,
@@ -141,6 +157,7 @@ class BLIPFeatureFusion(nn.Module):
             use_momentum=False,
         )
 
+        ### 用 index_mapping 从扁平化 embeddings 中取出查询与正例向量并做 L2 归一化。
         # Extract query embeddings
         q_indices = torch.tensor(index_mapping["query"]).flatten()  # shape: [batch_size]
         q_embeds = embeddings[q_indices]  # shape: [batch_size, embed_dim]
@@ -158,6 +175,7 @@ class BLIPFeatureFusion(nn.Module):
         # Query Candidate Contrastive Learning
         pc_idx = pc_idx.view(-1, 1)  # [batch_size, 1]
 
+        ### 列表 = [本批正例 ids | (可选)本批负例 ids | 队列中其余 ids]，方便与查询做一对多对齐。
         if enable_hard_neg:
             # If we have hard negatives,
             # we concatenate the positive and negative candidates as well as part of the queue
@@ -173,10 +191,12 @@ class BLIPFeatureFusion(nn.Module):
             idx_all = torch.cat([pc_idx.t().detach(), self.idx_queue.clone().detach()], dim=1)
             # [1, batch_size + queue_size]
 
+        ### sim_targets 是硬标签
         pos_idx = torch.eq(pc_idx, idx_all).float()  # [batch_size, queue_size + batch_size]
         pre_norm_sim_targets = pos_idx  # [batch_size, queue_size + batch_size]
         sim_targets = pos_idx / pos_idx.sum(1, keepdim=True)  # [batch_size, queue_size + batch_size]
 
+        ### 动量编码器目标（teacher logits）
         # get momentum features
         with torch.no_grad():
             self._momentum_update()
@@ -219,17 +239,20 @@ class BLIPFeatureFusion(nn.Module):
             sim_q2pc_m = q_embeds_m @ pc_embeds_m_all / self.temp  # [batch_size, queue_size + batch_size]
             sim_pc2q_m = pc_embeds_m @ q_embeds_m_all / self.temp  # [batch_size, queue_size + batch_size]
 
+            ### 后面那个是重点，最开始是1，逐渐变小，表示从“完全信任 teacher logits”到“完全信任硬标签”。
             sim_q2pc_targets = alpha * F.softmax(sim_q2pc_m, dim=1) + (1 - alpha) * sim_targets
             sim_pc2q_targets = alpha * F.softmax(sim_pc2q_m, dim=1) + (1 - alpha) * sim_targets
 
         sim_q2pc = q_embeds @ pc_embeds_m_all / self.temp
         sim_pc2q = pc_embeds @ q_embeds_m_all / self.temp
 
+        ### 双向对齐（查询→候选、候选→查询），各自与目标分布做 交叉熵（或 KL） 型损失，最后平均。
         loss_q2pc = -torch.sum(F.log_softmax(sim_q2pc, dim=1) * sim_q2pc_targets, dim=1).mean()
         loss_pc2q = -torch.sum(F.log_softmax(sim_pc2q, dim=1) * sim_pc2q_targets, dim=1).mean()
 
         loss_contrast = (loss_q2pc + loss_pc2q) / 2
 
+        ### 入队策略与队列更新
         if enable_hard_neg:
             # random chooses to enqueue negative candidates or positive candidates
             enqueue_p = torch.rand(1) < 0.5

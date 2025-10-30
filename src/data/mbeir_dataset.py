@@ -13,6 +13,7 @@ from PIL import Image
 
 from collections import defaultdict
 from torch.utils.data import Dataset
+### typechecked 用于运行时类型检查（collator 构造时更稳）
 from typeguard import typechecked
 
 # Project files
@@ -50,6 +51,7 @@ class MBEIRDatasetBase(Dataset):
     def __len__(self):
         raise NotImplementedError("This method should be implemented in derived classes.")
 
+    ### JSONL 读取：按行解析为 Python 对象列表。
     def _load_data_jsonl(self, datapath):
         data_entries = []
         with open(datapath, "r") as fin:
@@ -79,10 +81,14 @@ class MBEIRDatasetBase(Dataset):
         assert os.path.exists(full_instructions_path), f"Instructions Path {full_instructions_path} does not exist"
         assert full_instructions_path.endswith(".tsv"), f"Instructions Path {full_instructions_path} is not a tsv file"
         prompts_dict = {}
+        ### •	加载 TSV 指令模板（跳过首行 header）：
+	    ###     •	键："{dataset_id}, {query_modality}, {cand_modality}"（注意下标 [3], [0], [1] 的列顺序；TSV 模板必须匹配）。
+	    ###     •	值：从第 5 列起的所有非空指令候选列表。
         with open(full_instructions_path, "r") as f:
             next(f)  # Skip the header line
             for line in f.readlines():
                 parts = line.strip().split("\t")
+                ### query_modality	cand_modality	dataset_name	dataset_id	prompt_1	prompt_2	prompt_3	prompt_4
                 # Construct the key to be dataset_id, query_modality, cand_modality
                 key = f"{parts[3]}, {parts[0]}, {parts[1]}"
                 prompts = [p for p in parts[4:] if p]  # Filters out any empty prompts
@@ -126,6 +132,7 @@ class MBEIRMainDataset(MBEIRDatasetBase):
         returns=None,  # Catch any return-related settings
         print_config=True,  # Whether to print the dataset config
     ):
+        ### 继承基类并加载三类资源：查询数据、候选池（字典形态）、指令模板
         super().__init__(mbeir_data_dir, img_preprocess_fn)
 
         self._load_query_data(query_data_path)
@@ -139,6 +146,7 @@ class MBEIRMainDataset(MBEIRDatasetBase):
         self.hard_neg_num = hard_neg_num
 
         returns = {} if returns is None else returns
+        ### 返回字段控制：用传入的 returns 覆盖默认（YAML 中可设置）。
         self.returns = {
             "hashed_qid": True,  # default value
             "task_id": False,  # default value
@@ -165,6 +173,7 @@ class MBEIRMainDataset(MBEIRDatasetBase):
         print(f"Returns: {self.returns}")
         print(f"--------------------------\n")
 
+    ### 将候选池列表转为 {did: entry} 的字典，便于 O(1) 查询正/负例。
     def _load_cand_pool_as_dict(self, cand_pool_data_path):
         self._load_cand_pool(cand_pool_data_path)
         cand_pool_dict = {}
@@ -177,6 +186,7 @@ class MBEIRMainDataset(MBEIRDatasetBase):
     def __len__(self):
         return len(self.query_data)
 
+    ### 正样本选择策略（随机 or 首个）。
     def _get_random_cand(self, cand_list):
         return random.choice(cand_list)
 
@@ -185,8 +195,10 @@ class MBEIRMainDataset(MBEIRDatasetBase):
 
     def __getitem__(self, index):
         """Retrieve an item from the dataset by index."""
+        ### jsonl文件中的每一行
         mbeir_entry = self.query_data[index]
 
+        ### 读取一条查询：文本、图像路径、查询模态、qid 以及数据集 ID（从 qid 前缀派生）。
         query_txt = mbeir_entry.get("query_txt") or ""
         query_img_path = mbeir_entry.get("query_img_path", None)
         query_modality = mbeir_entry.get("query_modality", None)
@@ -199,11 +211,13 @@ class MBEIRMainDataset(MBEIRDatasetBase):
 
         # TODO: Fix this hack for OVEN and INFOSEEK
         # We only choose the one matched with the query dataset_id due to OVEN and INFOSEEK
+        ### Hack：某些数据集（OVEN、INFOSEEK）中正例列表可能跨数据集，这里在评估时仅保留与查询同数据集的正例，避免跨域干扰。
         if self.mode == Mode.EVAL:
             pos_cand_list = [
                 pos_cand_did for pos_cand_did in pos_cand_list if pos_cand_did.split(":")[0] == query_dataset_id
             ]
 
+        ### 选定一个正例 did 并在候选池 dict 中查出对应条目，取其模态与文本，并规范化文本。
         selected_pos_cand_did = self.select_cand(pos_cand_list)
         pos_cand = self.cand_pool.get(selected_pos_cand_did)
         assert pos_cand, f"Cannot find positive candidate {selected_pos_cand_did} for {mbeir_entry}"
@@ -216,11 +230,16 @@ class MBEIRMainDataset(MBEIRDatasetBase):
         # Randomly sample a query prompt
         # Note:query_modality and pos_cand_modality should define the golden modalities of the current mbeir_entry task.
         # neg_cand_modality could be different from pos_cand_modality.
+        ### 基于（数据集ID、查询模态、正例模态）键选取一条指令模板并拼接到查询文本前（若启用指令）
         query_prompt = self._get_random_query_prompt(query_dataset_id, query_modality, pos_cand_modality)
         query_txt_with_prompt = format_string(f"{query_prompt} {query_txt}")
         query_txt_without_prompt = format_string(query_txt)
 
         # Sample negative examples
+        ### •	训练模式下抽取显式负例：
+        ###     •	从查询条目的 neg_cand_list 中抽取 hard_neg_num 个 did，支持循环回绕（%），保证数量满足。
+        ###     •	若 shuffle_cand=True 则先随机打散。
+        ###     •	查到候选并规范化文本，构成负例列表。
         selected_neg_cand_list = []
         if self.mode == Mode.TRAIN:
             neg_cand_id_list = mbeir_entry.get("neg_cand_list", [])
@@ -240,6 +259,7 @@ class MBEIRMainDataset(MBEIRDatasetBase):
                     neg_cand["txt"] = neg_cand_txt
                     selected_neg_cand_list.append(neg_cand)
 
+        ### 小工具：按需加载图像并返回结构化字典。
         def _prepare_data_dict(txt, img_path):
             img = self._load_and_preprocess_image(img_path)
             return {"txt": txt, "img": img}
@@ -250,6 +270,7 @@ class MBEIRMainDataset(MBEIRDatasetBase):
         )
         instance = {"query": query}
 
+        ### 评估模式下可返回哈希后的 qid 与 task_id，便于对齐/分析。
         if self.mode == Mode.EVAL:
             if self.returns.get("hashed_qid"):
                 instance.update({"qid": hash_qid(qid)})
@@ -257,6 +278,10 @@ class MBEIRMainDataset(MBEIRDatasetBase):
                 instance.update({"task_id": get_mbeir_task_id(query_modality, pos_cand_modality)})
             # TODO: add src_content if needed
 
+        ### 训练模式下：
+        # •	可返回哈希后的正例 did（用于 in-batch 诊断、指标统计）。
+        # •	组装正例与负例条目（含 txt/img）。
+        # •	返回完整 instance。
         if self.mode == Mode.TRAIN:
             if self.returns.get("hashed_p_did"):
                 instance.update({"p_did": hash_did(selected_pos_cand_did)})
@@ -277,6 +302,9 @@ class MBEIRMainDataset(MBEIRDatasetBase):
             if len(neg_cand_list) > 0:
                 instance.update({"neg_cand_list": neg_cand_list})
         return instance
+
+### 推理专用数据集：MBEIRInferenceOnlyDataset
+### •	该类用于在线推理/检索时，仅有查询输入（无需候选池），逻辑与主数据集相似，但无正负例抽样，支持 qid/task_id 返回，且 enable_query_instruct 控制是否拼接 prompt。
 
 
 class MBEIRInferenceOnlyDataset(MBEIRDatasetBase):
@@ -412,6 +440,7 @@ class MBEIRCandidatePoolDataset(MBEIRDatasetBase):
 
 
 class MBEIRCollatorBase(object):
+    ### Collator 基类：接收分词器与图像尺寸，构造统一的padding 图像与空文本（用于缺失模态的填充）。
     @typechecked
     def __init__(self, tokenizer: Callable[[List[str]], Any], image_size: Union[tuple, int]):
         """
@@ -427,6 +456,8 @@ class MBEIRCollatorBase(object):
         self.padded_image = torch.zeros((3, self.H, self.W))  # Note: this is a black image
         self.padded_txt = ""  # Note: this is an empty string
 
+    ### 对文本/图像做缺省填充，并返回是否存在的 mask（1=有，0=无）。
+    ### 并非是token的mask，而是样本级别的mask，因为query形式可能只有文本或图像其中一种模态。
     def _get_padded_text_with_mask(self, txt):
         return (txt, 1) if txt not in [None, ""] else (self.padded_txt, 0)
 
@@ -442,18 +473,22 @@ class MBEIRMainCollator(MBEIRCollatorBase):
         super().__init__(tokenizer, image_size)
         self.mode = mode
 
+    ### 考虑嵌入jina V4的需求，重写collator逻辑，process_text,process_image,process_mix的逻辑应该是在这里
+    ### ### 关键设计：把 Query/Pos/Neg 的文本与图像扁平化拼成一批，便于模型做统一的批内张量化处理（加速）。
     def __call__(self, batch):
         # Note: I group txt/image from queries and candidates together to form a single tensor.
         # Allowing for efficient GPU-based processing.
 
         txt_list, txt_mask_list, img_list, img_mask_list = [], [], [], []
 
+        ### index_mapping 记录每个样本（inst_idx）在扁平化后张量中的索引位置，以便模型在前向/损失处能把对应的 query/pos/neg 再映射回去。
         index_mapping = {
             "query": [[] for _ in range(len(batch))],
         }
         instance_keys = ["query"]
 
         # Handle EVAL mode-specific operations
+        ### 评估模式：把 qid/task_id 从 instance 中弹出，单独存入列表（避免干扰后续打包）。
         qid_list, task_id_list = [], []
         if self.mode == Mode.EVAL:
             for instance in batch:
@@ -465,6 +500,8 @@ class MBEIRMainCollator(MBEIRCollatorBase):
                     task_id_list.append(task_id)
 
         # Handle TRAIN mode-specific operations
+        ### 训练模式：提取哈希的正例 did 列表，并在 index_mapping 中为 pos_cand 与（可选）neg_cand_list 新增索引槽位。
+        ### positive的did，但是是hash后的
         p_did_list = []
         if self.mode == Mode.TRAIN:
             for instance in batch:
@@ -480,6 +517,7 @@ class MBEIRMainCollator(MBEIRCollatorBase):
                 instance_keys.extend(["neg_cand_list"])
 
         # Generate Index Mapping
+        ### 核心：遍历 batch 中的每个样本/每个子键（query/pos/neg…），将条目扁平化追加，并记录它在扁平批次中的位置。
         counter = 0
         for inst_idx, instance in enumerate(batch):
             for instance_key in instance_keys:
@@ -497,6 +535,7 @@ class MBEIRMainCollator(MBEIRCollatorBase):
                     txt_mask_list.append(txt_mask)
                     img_mask_list.append(img_mask)
 
+        ### ？ 如果是BLIP-FF，这里self.tokenizer(txt_list)不需要考虑image token吗？
         processed_batch = {
             "txt_batched": self.tokenizer(txt_list),
             "image_batched": torch.stack(img_list, dim=0),

@@ -23,10 +23,13 @@ data_config:
     in_batch_neg_num: 0  # TODO: MOVE THIS TO MODEL Config
     shuffle_cand: True
     
+    ### 返回哈希化的 passage/doc id，便于缓存与去重。
     returns:
       hashed_p_did: True
 
     # Relative to mbeir_data_dir
+    ### query_instruct_path：指令模板 TSV 路径（通常含多种指令版本）。
+    ### •	train_* / val_*：训练/验证的查询与候选池路径（JSONL 结构）。
     enable_query_instruct: True
     query_instruct_path: "instructions/query_instructions.tsv"
 
@@ -63,11 +66,17 @@ model:
     size: "Large"
 
     vit: 'large'
+    ### 开启梯度检查点，显著节省显存（以算力换显存），训练略变慢。
     vit_grad_ckpt: True
+    ### 对 ViT 前 12 层或指定段落启用检查点（具体取决于实现）。可微调该值来平衡显存/速度。
     vit_ckpt_layer: 12  # Default
 
     embed_dim: 768
     image_size: 224
+    ### 负样本记忆库大小。
+	# •	需要远大于全局 batch，以保证负样本的新鲜度与多样性。
+	# •	安全设定建议：queue_size ≥ 8 × (train_batch_size × NPROC)；并保证能被实现中的dequeue/enqueue步长整除（若代码有此约束）。
+	# •	57,960 看起来与验证集规模或某预设常量相关；可根据GPU 数与 batch调整：如从 8×global_batch 起步，逐步增大至显存/显存外张量允许的上限。
     queue_size: 57960 # <-- Important! You need to adjust this value based on your num_gpus and batchsize
     alpha: 0.4
     tokenizer_max_length: 100
