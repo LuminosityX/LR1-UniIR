@@ -147,8 +147,31 @@ def build_model_from_config(config):
         assert os.path.exists(checkpoint_path), f"Checkpoint file {checkpoint_path} does not exist."
         print(f"loading BLIPFeatureFusion checkpoint from {checkpoint_path}")
         model.load_state_dict(torch.load(checkpoint_path)["model"])
-    else:
-        raise NotImplementedError(f"Model {model_name} is not implemented.")
+    elif model_name == "JinaEmbeddingsV4":
+        import sys
+        sys.path.insert(0, "/data/jina-v4-local-copy")
+
+        # 2. 导入模型类
+        from modeling_jina_embeddings_v4 import JinaEmbeddingsV4Model
+
+        # 3. 加载模型（带 LoRA 训练模式）
+        model_config = config.model
+        model = JinaEmbeddingsV4Model.from_pretrained(
+            "/data/jina-v4-local-copy",   # 本地权重目录
+            is_training=True,             # 开启 LoRA
+            torch_dtype=torch.float16,    # 混合精度
+        )
+
+        # 4. 断点续训（可选）
+        ckpt_config = model_config.ckpt_config
+        if ckpt_config.resume_training:
+            checkpoint_path = os.path.join(config.uniir_dir, ckpt_config.ckpt_dir, ckpt_config.ckpt_name)
+            assert os.path.exists(checkpoint_path), f"Checkpoint {checkpoint_path} not found."
+            print(f"Resume Jina-V4 from {checkpoint_path}")
+            checkpoint = torch.load(checkpoint_path, map_location="cpu")
+            model.load_state_dict(checkpoint["model"], strict=False)   # LoRA 参数
+        else:
+            raise NotImplementedError(f"Model {model_name} is not implemented.")
         # Notes: Add other models here
     return model
 

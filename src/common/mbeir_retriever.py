@@ -754,7 +754,8 @@ def main():
         create_index(config)
 
     if args.enable_retrieval:
-        run_retrieval(config, query_embedder_config)
+        # run_retrieval(config, query_embedder_config)
+        run_retrieval(config, query_embedder_config if interactive_retrieval else None)
 
     # Destroy the process group
     if interactive_retrieval and query_embedder_config.dist_config.distributed_mode:

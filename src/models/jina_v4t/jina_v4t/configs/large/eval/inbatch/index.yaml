@@ -1,0 +1,23 @@
+experiment:
+  instruct_status: Instruct
+  path_suffix: jina_v4t/large/Instruct/InBatch
+index_config:
+  cand_pools_config:
+    cand_pools_name_to_idx:
+    - mscoco_task3_test
+    - webqa_task1
+    - UNION
+    enable_idx: true
+  embed_dir_name: embed
+  faiss_config:
+    dim: 2048
+    idx_type: Flat
+    metric: METRIC_INNER_PRODUCT
+  index_dir_name: indices
+mbeir_data_dir: /data/UniIR/M-BEIR
+model:
+  name: JinaV4UniIR
+  pretrained_model_dir: /data/LR1-UniIR/src/models/jina_v4t/jina_v4t.py
+  short_name: jina_v4t
+  size: large
+uniir_dir: /data/UniIR

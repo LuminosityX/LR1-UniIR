@@ -460,7 +460,24 @@ def generate_embeds_for_config(model, img_preprocess_fn, tokenizer, config):
             if dist.is_initialized():
                 dist.barrier()  # Wait for rank 0 to finish saving the embeddings and ids.
 
+# 放在 import 后面、main() 前面即可
+from torchvision import transforms as T
+from PIL import Image
+def jina_v4_tensor_preprocess(image: Image.Image) -> torch.Tensor:
+    """
+    一次性把 PIL 转成官方期望的 float32 Tensor[3,448,448]
+    均值方差与 Jina 训练时完全一致
+    """
+    return T.Compose([
+        T.Resize((224, 224)),          # 与 Jina 训练分辨率一致
+        T.ToTensor(),                  # 0~1
+        # T.Normalize(
+        #     mean=[0.48145466, 0.4578275,  0.40821073],
+        #     std =[0.26862954, 0.26130258, 0.27577711]
+        # ),                             # 归一化
+    ])(image)
 
+    ##################
 def main(config):
     # Set up seed for reproducibility
     seed = config.seed + dist_utils.get_rank()
@@ -477,7 +494,10 @@ def main(config):
         raise AttributeError("The provided model does not have an 'img_preprocess_fn' attribute.")
     if not callable(getattr(model, "get_tokenizer")):
         raise AttributeError("The provided model does not have a 'tokenizer' attribute.")
-    img_preprocess_fn = model.get_img_preprocess_fn()
+    #img_preprocess_fn = model.get_img_preprocess_fn()
+    ##############图像处理关键！！！！！！！！！！！！
+    #img_preprocess_fn =jina_v4_tensor_preprocess
+    img_preprocess_fn = lambda x : x
     tokenizer = model.get_tokenizer()
 
     # Enable distributed data parallel
