@@ -101,100 +101,7 @@ class JinaV4UniIR(nn.Module):
         img_tensor = torch.clamp(img_tensor, 0, 1)
         return transforms.ToPILImage()(img_tensor.cpu())
     
-        # ========================== 新增两个方法放弃使用暂未删除 ==========================
-    # @torch.no_grad()
-    # def encode_image_tensor(
-    #     self,
-    #     tensors: List[torch.Tensor],          # [C,H,W] 已 normalize 的 float32
-    #     prompt_name: str = "query",
-    #     batch_size: int = 8,
-    # ) -> np.ndarray:
-    #     """
-    #     直接接收预处理好的 Tensor，不再做 ToPIL / resize / normalize
-    #     """
-    #     from torchvision import transforms as T
-    #     embs = []
-    #     for i in range(0, len(tensors), batch_size):
-    #         batch_tensors = tensors[i:i + batch_size]          # List[Tensor[C,H,W]]
-    #         # 1. 统一 resize 到 448（如果你 uniir 已经做过可跳过）
-    #         resize = T.Resize((224, 224), antialias=True)
-    #         batch_tensors = [resize(t) for t in batch_tensors]
-    #         # 2. 转 PIL（因为 Jina processor 只认 PIL）
-    #         # pil_batch = [T.ToPILImage()(t) for t in batch_tensors]
-    #         # 2. 直接给 uint8 Tensor（官方已支持）
-    #         tensor_batch = [(t.clamp(0, 1) * 255).byte().cpu() for t in batch_tensors]
-    #         # 3. 走原生 encode_image
-    #         out = self.model.encode_image(tensor_batch, task="retrieval")
-    #         if isinstance(out, list):
-    #             batch_emb = torch.stack(out, dim=0)
-    #         elif hasattr(out, 'single_vec_emb'):
-    #             batch_emb = out.single_vec_emb
-    #         else:
-    #             batch_emb = out
-    #         embs.append(batch_emb.cpu().numpy())
-            
-    #     return np.concatenate(embs, axis=0) 
-
-    # @torch.no_grad()
-    # def _encode_fusion_tensor(
-    #     self,
-    #     texts: List[str],
-    #     tensors: List[torch.Tensor],
-    #     prompt_name: str = "query",
-    #     batch_size: int = 8,
-    # ) -> np.ndarray:
-    #     """
-    #     图文融合，但图像侧直接给 Tensor
-    #     """
-    #     embs = []
-    #     for i in range(0, len(texts), batch_size):
-    #         txt_b = texts[i:i + batch_size]
-    #         ten_b = tensors[i:i + batch_size]
-    #         # Tensor -> PIL
-    #         # pil_b = [T.ToPILImage()(t) for t in ten_b]
-    #         # 原：pil_b = [T.ToPILImage()(t) for t in ten_b]
-    #         # 改：
-    #         tensor_b = [(t.clamp(0, 1) * 255).byte().cpu() for t in ten_b]
-            
-    #         prompts = [f"<|im_start|>user\n{t}<|vision_start|><|image_pad|><|vision_end|><|im_end|>\n"
-    #                    for t in txt_b]
-    #         # model_inputs = self.model.processor(
-    #         #     text=prompts,
-    #         #     images=pil_b,
-    #         #     padding="longest",
-    #         #     return_tensors="pt",
-    #         # ).to(self.device)
-    #         model_inputs = self.model.processor(
-    #             text=prompts,
-    #             images=tensor_b,          # ← 直接给 Tensor
-    #             padding="longest",
-    #             return_tensors="pt",
-    #         )
-    #         # 切 patch / pad 同原逻辑
-    #         offsets = model_inputs["image_grid_thw"][:, 1] * model_inputs["image_grid_thw"][:, 2]
-    #         pixel_values = torch.split(model_inputs["pixel_values"], offsets.tolist())
-    #         max_len = max(pv.shape[0] for pv in pixel_values)
-    #         pixel_values = [
-    #             torch.cat([pv, torch.zeros((max_len - pv.shape[0], pv.shape[1]),
-    #                                        dtype=pv.dtype, device=pv.device)])
-    #             for pv in pixel_values
-    #         ]
-    #         model_inputs["pixel_values"] = torch.stack(pixel_values)
-    #         # ✅ 显式搬设备
-    #         model_inputs = {k: v.to(self.device) for k, v in model_inputs.items()}
-
-    #         # out = self.model(task_label="retrieval", **model_inputs)
-    #         out = self.model.forward_original(
-    #             task_label="retrieval",
-    #             input_ids=model_inputs["input_ids"],
-    #             attention_mask=model_inputs["attention_mask"],
-    #             #pixel_values=model_inputs["pixel_values"],
-    #             image_grid_thw=model_inputs["image_grid_thw"],
-    #         )
-    #         emb = out.single_vec_emb.cpu().numpy()
-    #         embs.append(emb)
-    #     #print("[def _encode_fusion_tensor(]")
-    #     return np.concatenate(embs, axis=0) 
+      
        # ========================== 修改 encode_mbeir_batch ==========================
     def encode_mbeir_batch(self, batch):
         # 1. 先取 flag
@@ -224,8 +131,6 @@ class JinaV4UniIR(nn.Module):
                 else:
                     return self._encode_text(texts, prompt_name="query" if "query" in index_mapping else "passage",batch_size=len(texts))
 
-        # 3. 下面与你原来一模一样，只是原来「if mod==image: embs = self._encode_images」
-        #    现在统一换成 embs = _encode_grp(mod, ...)
         index_mapping = batch.get("index_mapping", {})
         all_txt = batch["txt_batched"]["input_ids"]
         all_img = batch["image_batched"]          # Tensor[B,3,H,W]应该是pil

@@ -45,11 +45,11 @@ model:
   tokenizer_max_length: 100
 seed: 2023
 trainer_config:
-  gradient_accumulation_steps: 1
-  init_lr: 1e-5
-  num_train_epochs: 1
+  gradient_accumulation_steps: 8
+  init_lr: 1e-4
+  num_train_epochs: 3
   print_freq: 5
   weight_decay: 0.05
 wandb_config:
-  enabled: false
+  enabled: true
   experiment_name: ${experiment.description}

@@ -22,6 +22,10 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from omegaconf import OmegaConf
 from dotenv import load_dotenv
 import wandb
+import swanlab, os
+# 关键：让 swanlab 接管 wandb 的日志，并缓存在本地
+swanlab.sync_wandb()   # ① 离线双写
+os.environ["WANDB_MODE"] = "offline"  # ② 让 wandb 也写本地，不撞墙
 from pathlib import Path
 # Local modules or packages
 from data.mbeir_data_utils import (
@@ -172,7 +176,7 @@ def train(
             ### 仅主进程往 WandB 推指标，避免重复
             if config.wandb_config.enabled:
                 wandb.log(log_stats)
-        print(f'Epoch {epoch}, Loss: {loss.item()}')
+            # print(f'Epoch {epoch}, Loss: {loss.item()}')
         ### barrier：同步所有进程，确保主进程写操作完成。
 	    ### empty_cache：释放未使用的显存缓存，缓解碎片问题（非必须，但长跑稳定性更好）。
         dist.barrier()  # Wait for the master process to finish writing the log file
@@ -241,11 +245,24 @@ def main(config):
 
     # Set up optimizer, and scaler
     trainer_config = config.trainer_config
-    optimizer = torch.optim.AdamW(
-        params=model.parameters(),
-        lr=trainer_config.init_lr,
-        weight_decay=trainer_config.weight_decay,
-    )
+    ############################
+    def get_param_groups(model, wd=0.05):
+        decay, no_decay = [], []
+        for name, p in model.named_parameters():
+            if not p.requires_grad:
+                continue
+            if "lora_" in name:          # LoRA 层
+                no_decay.append(p)
+            else:
+                decay.append(p)
+        return [{"params": decay, "weight_decay": wd},
+                {"params": no_decay, "weight_decay": 0.0}]
+    # optimizer = torch.optim.AdamW(
+    #     params=model.parameters(),
+    #     lr=trainer_config.init_lr,
+    #     weight_decay=trainer_config.weight_decay,
+    # )
+    optimizer = torch.optim.AdamW(get_param_groups(model), lr=trainer_config.init_lr)
     scaler = GradScaler()  # Initialize the GradScaler
 
     #### 换了模型，需要考虑修改这里的代码

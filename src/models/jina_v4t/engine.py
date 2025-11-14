@@ -4,6 +4,7 @@ import transformers
 
 from torch import nn
 from models.jina_v4t import utils
+import torch.nn.functional as F
 def contrastive_loss(logits: torch.Tensor) -> torch.Tensor:
     return nn.functional.cross_entropy(logits, torch.arange(len(logits), device=logits.device))
 
@@ -59,7 +60,24 @@ def train_one_epoch(model, data_loader, optimizer, epoch, gpu_id, scheduler, glo
             #print("[batch-forward]",batch)
             output = model(**batch)         # 不再显式传 alpha
             loss = output.loss
-
+            # ---------- 对比学习“卡住”诊断 ----------
+            if i % 200 == 0:                       # 每 200 步诊断一次，可调
+                with torch.no_grad():
+                    f_q   = output.query_embeddings          # [B, D]
+                    f_t   = output.target_embeddings         # [B, D]
+                    # 1) 特征模长
+                    f_norm_q = f_q.norm(dim=1).mean().item()
+                    f_norm_t = f_t.norm(dim=1).mean().item()
+                    # 2) 特征 cosine 矩阵
+                    cos = torch.matmul(F.normalize(f_q, dim=1),
+                                    F.normalize(f_t, dim=1).t())  # [B,B]
+                    cos_mean = cos.mean().item()
+                    cos_off  = (cos - torch.eye(cos.shape[0], device=cos.device)).abs().mean().item()
+                    # 3) logits 范围 & τ（如果 loss 里有 τ）
+                    logits = f_q @ f_t.t() / 0.01  ###############
+                    print(f'[diag] f_norm=({f_norm_q:.3f},{f_norm_t:.3f}) '
+                        f'cos={cos_mean:.3f} off-diag={cos_off:.3f} '
+                        f'logits=({logits.min().item():.3f},{logits.max().item():.3f})')
             with torch.no_grad():
                 q = output.query_embeddings
                 t = output.target_embeddings

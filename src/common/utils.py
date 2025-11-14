@@ -147,6 +147,7 @@ def build_model_from_config(config):
         assert os.path.exists(checkpoint_path), f"Checkpoint file {checkpoint_path} does not exist."
         print(f"loading BLIPFeatureFusion checkpoint from {checkpoint_path}")
         model.load_state_dict(torch.load(checkpoint_path)["model"])
+    ##############增加jina
     elif model_name == "JinaEmbeddingsV4":
         import sys
         sys.path.insert(0, "/data/jina-v4-local-copy")
