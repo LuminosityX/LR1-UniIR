@@ -24,7 +24,7 @@ EXP_NAME="inbatch"
 CONFIG_DIR="$MODEL_DIR/configs/$SIZE/$MODE/$EXP_NAME"
 
 # Set CUDA devices and PYTHONPATH
-export CUDA_VISIBLE_DEVICES=4  # <--- Change this to the CUDA devices you want to use
+export CUDA_VISIBLE_DEVICES=6  # <--- Change this to the CUDA devices you want to use
 NPROC=1 # <--- Change this to the number of GPUs you want to use
 export PYTHONPATH=$SRC
 echo "PYTHONPATH: $PYTHONPATH"
@@ -48,7 +48,7 @@ python config_updater.py \
     --mbeir_yaml_file_path $CONFIG_PATH \
     --enable_instruct True
 
-export MASTER_PORT=29556
+export MASTER_PORT=29557
 export MASTER_ADDR=127.0.0.1
 # export WORLD_SIZE=1
     # --nproc_per_node=1 \
@@ -59,7 +59,7 @@ python -m torch.distributed.run \
     --nproc_per_node=1 \
     --master_port=$MASTER_PORT \
     --master_addr=$MASTER_ADDR \
-    /data/LR1-UniIR/src/common/mbeir_embedder.py \
+    /data/UniIR/UniIR-main/src/common/mbeir_embedder.py \
     --config_path "$CONFIG_PATH" \
     --uniir_dir "$UNIIR_DIR" \
     --mbeir_data_dir "$MBEIR_DATA_DIR" 

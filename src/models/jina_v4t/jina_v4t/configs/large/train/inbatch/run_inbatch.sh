@@ -23,9 +23,9 @@ EXP_NAME="inbatch"
 CONFIG_DIR="$MODEL_DIR/configs/$SIZE/$MODE/$EXP_NAME"
 
 # Set CUDA devices and PYTHONPATH
-export CUDA_VISIBLE_DEVICES=6,7
+export CUDA_VISIBLE_DEVICES=2,3,4,5
 # <--- Change this to the CUDA devices you want to us
-NPROC=2
+NPROC=4
 ### PYTHONPATH=$SRC 让 python 能从 src 根导入包。
 export PYTHONPATH=$SRC
 echo "PYTHONPATH: $PYTHONPATH"
@@ -58,7 +58,7 @@ export MASTER_ADDR=127.0.0.1
 #     --uniir_dir "$UNIIR_DIR" \
 #     --mbeir_data_dir "$MBEIR_DATA_DIR"
 python -m torch.distributed.run \
-    --nproc_per_node=2 \
+    --nproc_per_node=4 \
     --master_port=$MASTER_PORT \
     --master_addr=$MASTER_ADDR \
     /data/LR1-UniIR/src/models/jina_v4t/train.py \

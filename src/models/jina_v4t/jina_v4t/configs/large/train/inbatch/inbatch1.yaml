@@ -7,10 +7,10 @@ data_config:
   returns:
     hashed_p_did: true
   shuffle_cand: true
-  train_cand_pool_path: /data/M-BEIR/mini_cand/train/mbeir_mscoco_task3_train_cand_pool.jsonl
-  train_query_data_path: /data/M-BEIR/mini_query/train/mbeir_mscoco_train.jsonl
-  val_cand_pool_path: /data/M-BEIR/mini_cand/val/mbeir_mscoco_task3_val_cand_pool.jsonl
-  val_query_data_path: /data/M-BEIR/mini_query/val/mbeir_mscoco_task3_val.jsonl
+  train_cand_pool_path: /data/M-BEIR/cand_pool/global/mbeir_union_train_cand_pool.jsonl
+  train_query_data_path: /data/M-BEIR/query/union_train/mbeir_union_up_train.jsonl
+  val_cand_pool_path: /data/M-BEIR/cand_pool/global/mbeir_union_val_cand_pool.jsonl
+  val_query_data_path: /data/M-BEIR/query/union_val/mbeir_union_val.jsonl
 dataloader_config:
   num_workers: 5
   train_batch_size: 4
@@ -18,8 +18,8 @@ dataloader_config:
 dist_config:
   dist_url: env://
 evaluator:
-  enable_eval: false
-  eval_freq: 1
+  enable_eval: true
+  eval_freq: 10
   print_freq: 10
 experiment:
   description: ${model.name} ${model.size} ${experiment.instruct_status} ${experiment.exp_name}

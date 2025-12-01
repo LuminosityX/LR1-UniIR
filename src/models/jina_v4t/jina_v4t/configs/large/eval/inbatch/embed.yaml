@@ -44,7 +44,7 @@ experiment:
   path_suffix: ${model.short_name}/${model.size}/${experiment.instruct_status}/${experiment.exp_name}/
 model:
   name: JinaV4UniIR
-  pretrained_model_dir: /data/LR1-UniIR/src/models/jina_v4t/jina_v4t.py
+  pretrained_model_dir: jina_v4t
   short_name: jina_v4t
   size: large
 seed: 2023

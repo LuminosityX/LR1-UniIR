@@ -5,6 +5,7 @@ import os
 import random
 import time
 import datetime
+from PIL import Image
 from transformers import AutoModel
 # Third-party
 import numpy as np
@@ -23,8 +24,10 @@ from omegaconf import OmegaConf
 from dotenv import load_dotenv
 import wandb
 import swanlab, os
+from peft import PeftModel
 # 关键：让 swanlab 接管 wandb 的日志，并缓存在本地
 swanlab.sync_wandb()   # ① 离线双写
+logging.getLogger("swanlab").setLevel(logging.WARNING)
 os.environ["WANDB_MODE"] = "offline"  # ② 让 wandb 也写本地，不撞墙
 from pathlib import Path
 # Local modules or packages
@@ -59,6 +62,8 @@ import utils
 # Set up logger
 logger = logging.getLogger()
 
+# from debug_jina_v4 import apply_debug
+# apply_debug(JinaEmbeddingsV4Model, JinaV4Collator)   # 替换成真实类名
 
 def set_seed(seed):
     random.seed(seed)
@@ -66,10 +71,32 @@ def set_seed(seed):
     torch.manual_seed(seed)
 
 
-def save_checkpoint(model, optimizer, scheduler, epoch, scaler, config):
+# def save_checkpoint(model, optimizer, scheduler, epoch, scaler, config):
+#     ckpt_config = config.model.ckpt_config
+#     model_name = config.model.short_name.lower()
+#     checkpoint_name = f"{model_name}_epoch_{epoch}.pth"
+#     save_obj = {
+#         "model": model.state_dict(),
+#         "optimizer": optimizer.state_dict(),
+#         "scheduler": scheduler.state_dict(),
+#         "config": config,
+#         "epoch": epoch,
+#         "scaler": scaler.state_dict(),
+#     }
+#     checkpoint_path = os.path.join(config.uniir_dir, ckpt_config.ckpt_dir, checkpoint_name)
+#     os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
+#     torch.save(save_obj, checkpoint_path)
+#     print(f"Saved checkpoint to {checkpoint_path}")
+
+def save_checkpoint(model, optimizer, scheduler, epoch, scaler, config, suffix=None):
     ckpt_config = config.model.ckpt_config
     model_name = config.model.short_name.lower()
-    checkpoint_name = f"{model_name}_epoch_{epoch}.pth"
+    # 如果传了 suffix，就用 suffix，否则按原来 epoch 命名
+    if suffix is None:
+        checkpoint_name = f"{model_name}_epoch_{epoch}.pth"
+    else:
+        checkpoint_name = f"{model_name}_{suffix}.pth"
+
     save_obj = {
         "model": model.state_dict(),
         "optimizer": optimizer.state_dict(),
@@ -130,7 +157,7 @@ def train(
         
         if is_distributed_mode:
             train_loader.sampler.set_epoch(epoch)
-
+        global_step = 0
         train_stats = train_one_epoch(
             model,
             train_loader,
@@ -179,6 +206,8 @@ def train(
             # print(f'Epoch {epoch}, Loss: {loss.item()}')
         ### barrier：同步所有进程，确保主进程写操作完成。
 	    ### empty_cache：释放未使用的显存缓存，缓解碎片问题（非必须，但长跑稳定性更好）。
+        # 在 optimizer.step() 之后立刻打
+        
         dist.barrier()  # Wait for the master process to finish writing the log file
         torch.cuda.empty_cache()
 
@@ -199,18 +228,81 @@ def main(config):
     model_config = config.model
     ckpt_config = model_config.ckpt_config
     if model_config.name == "JinaEmbeddingsV4":
+        import torch
+        from pathlib import Path
+        from transformers import AutoModel
+        from peft import PeftModel
+
         model_dir = Path("/data/jina-v4-local-copy")
-        model = AutoModel.from_pretrained(
-            str(model_dir), trust_remote_code=True, dtype=torch.float16,is_training=True,
+        ADAPTER_PATH_ROUND1 = Path("/data/jina-v4-local-copy/adapters_exp0329")  # ← 第一次 LoRA
+
+        # 1) 裸载入 base
+        base_model = AutoModel.from_pretrained(
+            str(model_dir),
+            trust_remote_code=True,
+            torch_dtype=torch.float16,
         )
+
+        # 2) 挂上已有 adapter，名字用 default（与文件夹里保存的一致）
+        # 1. 先挂 retrieval
+        model = PeftModel.from_pretrained(base_model,
+                                        "/data/jina-v4-local-copy/adapters_exp0329",
+                                        adapter_name="retrieval")
+
+        # 2. 继续挂另外两个（PEFT 0.7.0+ 支持多 adapter）
+        model.load_adapter("/data/jina-v4-local-copy/adapters_exp0329",
+                        adapter_name="text-matching")
+        model.load_adapter("/data/jina-v4-local-copy/adapters_exp0329",
+                        adapter_name="code")
+        from safetensors import safe_open
+        import numpy as np
+
+        # st_file = "/data/jina-v4-local-copy/adapters_exp0329/adapter_model.safetensors"
+
+        # with safe_open(st_file, framework="pt", device="cpu") as f:
+        #     for k in f.keys():
+        #         if "lora_B" in k:
+        #             tensor = f.get_tensor(k)          # numpy array
+        #             print(k, tensor.shape)
+        #             print("max =", tensor.max(), "mean =", tensor.mean())
+        import torch
+        for n, p in model.named_parameters():
+            if "lora_B" in n and "default" in n:
+                print(n, p.max().item(), p.mean().item())
+                break
+        # 3) 接着 default 继续训练：打开梯度
+        model.set_adapter("default")
+        model.enable_adapter_layers()   # 让 A/B 可训练
+
+        # 4) 你原来的温度/统计逻辑保持不动
+        model.temperature.data = torch.tensor(0.07, device=model.temperature.device)
+        print("[DEBUG] temperature reset to:", model.temperature.item())
+
         total_params = sum(p.numel() for p in model.parameters())
-
-        # 计算可训练参数的数量
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-        # 输出
         print(f"Total parameters: {total_params}")
         print(f"Trainable parameters: {trainable_params}")
+        print("Active adapter:", model.active_adapters)
+    # if model_config.name == "JinaEmbeddingsV4":
+    #     model_dir = Path("/data/jina-v4-local-copy")
+    #     model = AutoModel.from_pretrained(
+    #         str(model_dir), trust_remote_code=True, dtype=torch.float16,is_training=True,
+    #     )
+    #     # 在 main() 里，加载完模型后、DDP 前
+    #     model.temperature.data = torch.tensor(0.07, device=model.temperature.device)
+    #     print("[DEBUG] temperature reset to:", model.temperature.item())
+    #     total_params = sum(p.numel() for p in model.parameters())
+    #     # 加载后立刻看有哪些 adapter
+    #     print("Available adapters:", list(model.peft_config.keys()))
+    #     # 用实际存在的名字
+    #     model.set_adapter(list(model.peft_config.keys())[0])   # 先用第一个
+    #     print("Active adapter:", model.active_adapters)
+    #     # 计算可训练参数的数量
+    #     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+    #     # 输出
+    #     print(f"Total parameters: {total_params}")
+    #     print(f"Trainable parameters: {trainable_params}")
     # if model_config.name == "BLIPScoreFusion":
     #     model = blip_sf(
     #         pretrained=ckpt_config.pretrained_blip_url,  # This always saved to cache
@@ -246,7 +338,7 @@ def main(config):
     # Set up optimizer, and scaler
     trainer_config = config.trainer_config
     ############################
-    def get_param_groups(model, wd=0.05):
+    def get_param_groups(model, wd=0.0):
         decay, no_decay = [], []
         for name, p in model.named_parameters():
             if not p.requires_grad:
@@ -262,6 +354,15 @@ def main(config):
     #     lr=trainer_config.init_lr,
     #     weight_decay=trainer_config.weight_decay,
     # )
+    print("[name, p.shape]=====================")
+    # for name, p in model.named_parameters():
+    #     if p.requires_grad:
+    #         print(name, p.shape)
+    for n,p in model.named_parameters(): 
+        if p.requires_grad:
+            if 'lora' in n: 
+                print(n, p.max().item(), p.mean().item())
+            
     optimizer = torch.optim.AdamW(get_param_groups(model), lr=trainer_config.init_lr)
     scaler = GradScaler()  # Initialize the GradScaler
 
@@ -373,6 +474,56 @@ def main(config):
 
     # Training loop
     ### barrier 一次，确保各 rank 均准备好
+    # --------- 6-in-1 pre-flight check ---------
+    # model_without_ddp.eval()          # 先保证无dropout
+    # with torch.no_grad():
+    #     # 1. adapter状态
+    #     print("=== 1. adapter状态 ===")
+    #     print("model.training:", model.training)
+    #     print("PeftModel?:", isinstance(model_without_ddp, PeftModel))
+    #     if isinstance(model_without_ddp, PeftModel):
+    #         cfg = model_without_ddp.peft_config['default']
+    #         print("inference_mode:", cfg.inference_mode)
+
+    #     # 2. LoRA权重
+    #     print("=== 2. LoRA权重采样 ===")
+    #     for n, p in model_without_ddp.named_parameters():
+    #         if 'lora' in n and 'retrieval' in n:
+    #             print(n, p.mean().item(), p.std().item())
+    #             break
+
+    #     # 3. text漂移
+    #     print("=== 3. text embedding漂移 ===")
+    #     emb_cat = model_without_ddp.encode_text("cat", prompt_name="query",task = "retrieval")
+    #     coll  = train_collector
+    #     mini_batch = coll(["cat"])          # 伪batch=1
+    #     mini_batch = {k: v.to(device) for k,v in mini_batch.items()}
+    #     out = model_without_ddp(task_label="retrieval", **mini_batch)
+    #     emb_now = out.single_vec_emb[0].cpu().numpy()
+    #     cos = float(np.dot(emb_cat, emb_now) / (np.linalg.norm(emb_cat)*np.linalg.norm(emb_now)))
+    #     print("cos(cat_pretrained, cat_step0) =", cos)
+
+    #     # 4. 路由
+    #     print("=== 4. 路由 ===")
+    #     print("active_adapters:", model_without_ddp.active_adapters)
+    #     print("task:", model_without_ddp.task)
+
+    # # 5. temperature梯度
+    # model_without_ddp.train()
+    # model_without_ddp.zero_grad()
+    # tmp = model_without_ddp.temperature
+    # fake_logits = torch.randn(4,4, device=device) / tmp
+    # fake_loss = clip_loss(fake_logits)
+    # fake_loss.backward()
+    # print("=== 5. temp grad ===", tmp.grad.item())
+
+    # # 6. 单batch loss脚印
+    # single = next(iter(train_loader))
+    # for k,v in single.items():
+    #     if isinstance(v, torch.Tensor): single[k] = v[:4].to(device)
+    # logits = model_without_ddp(**single).query_embeddings @ model_without_ddp(**single).target_embeddings.t()
+    # logits /= model_without_ddp.temperature
+    # print("=== 6. step-0 loss =", clip_loss(logits).item())
     dist.barrier()
     train(
         train_loader,

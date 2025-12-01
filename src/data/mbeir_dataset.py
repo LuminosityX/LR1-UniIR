@@ -285,8 +285,13 @@ class MBEIRMainDataset(MBEIRDatasetBase):
             (query_txt_with_prompt if self.enable_query_instruct else query_txt_without_prompt),
             query_img_path,
         )
+        query["qid"] = qid #######################
+        query["modality"]   = query_modality
         instance = {"query": query}
-
+        
+        # # ===== 1. 始终带 qid / pos_did（调试用） =====
+        # instance["qid"] = qid
+        # instance["pos_did"] = selected_pos_cand_did
         ### 评估模式下可返回哈希后的 qid 与 task_id，便于对齐/分析。
         if self.mode == Mode.EVAL:
             if self.returns.get("hashed_qid"):
@@ -307,6 +312,8 @@ class MBEIRMainDataset(MBEIRDatasetBase):
                 pos_cand_txt,
                 pos_cand.get("img_path", None),
             )
+            pos_cand["did"] = selected_pos_cand_did   # 保险#################
+            pos_cand["modality"] = pos_cand_modality
             instance.update({"pos_cand": pos_cand})
 
             neg_cand_list = [
@@ -318,6 +325,9 @@ class MBEIRMainDataset(MBEIRDatasetBase):
             ]
             if len(neg_cand_list) > 0:
                 instance.update({"neg_cand_list": neg_cand_list})
+        # ===== 错位诊断：仅打印前 5 条 =====
+        if index < 5:
+            print(f'[DATASET] idx={index}  qid={qid}  pos_did={selected_pos_cand_did}')
         return instance
 
 ### 推理专用数据集：MBEIRInferenceOnlyDataset
@@ -557,7 +567,8 @@ class MBEIRMainCollator(MBEIRCollatorBase):
         ###传到processed_batch:txt分词；img拼起来
         ### ？ 如果是BLIP-FF，这里self.tokenizer(txt_list)不需要考虑image token吗？
         processed_batch = {
-            "txt_batched": self.tokenizer(txt_list,return_tensors="pt",padding=True),
+            "txt_batched": txt_list,
+            # "txt_batched": self.tokenizer(txt_list,return_tensors="pt",padding=True),
             #"image_batched": torch.stack(img_list, dim=0),###############pil不能这么拼，但是jina又只能接受pil 换一种拼法（也不是只能接受pil，而是对tensor会有一系列多余操作）
             "image_batched": img_list,
             "txt_mask_batched": torch.tensor(txt_mask_list, dtype=torch.long),
@@ -592,7 +603,162 @@ import torch
 
 from typing import Dict, Any
 import torch
+# class JinaV4Collator(MBEIRMainCollator):
+#     """
+#     只产「字符串 + PIL」+ 模态标签，图像编码完全推迟到模型内部。
+#     分别 tokenize query / target，确保长度正确。
+#     """
+#     def __init__(self, tokenizer, image_size, mode):
+#         super().__init__(tokenizer=tokenizer, image_size=image_size, mode=mode)
 
+#     # ==================== 唯一对外接口 ====================
+#     def collate_for_forward(self, batch) -> Dict[str, Any]:
+#         # 1. 让父类跑完采样 → 只拿图像 + 索引映射，文本我们重新 tokenize
+#         #print("[batch]",batch)
+#         blip_batch = super().__call__(batch)
+#         #print("[blip_batch]",blip_batch)
+#         images        = blip_batch["image_batched"]          # List[PIL] 扁平
+#         idx_map       = blip_batch["index_mapping"]          # 用于抽图像
+#         #print("[idx_map]",idx_map)
+#         # 2. 取出整数索引（不再是 list！）
+#         query_idxs = [idx_map["query"][i][0]    for i in range(len(batch))]
+#         targ_idxs  = [idx_map["pos_cand"][i][0] for i in range(len(batch))]
+#         #print("[query_idxs]",query_idxs)
+#         #print("[targ_idxs]",targ_idxs)
+#         # 3. 抽图：None 表示该样本无图
+#         query_imgs = [images[i] if i is not None else None for i in query_idxs]
+#         target_imgs= [images[i] if i is not None else None for i in targ_idxs]
+
+#         # 4. 重新分别 tokenize 文本（保证长度精确）
+#         query_txts  = [inst["query"]["txt"]      for inst in batch]
+#         target_txts = [inst["pos_cand"]["txt"]   for inst in batch]
+
+#         # 空文本保护
+#         query_txts  = [t if t else "" for t in query_txts]
+#         target_txts = [t if t else "" for t in target_txts]
+
+#         query_enc  = self.tokenizer(query_txts,  return_tensors="pt", padding=True)
+#         target_enc = self.tokenizer(target_txts, return_tensors="pt", padding=True)
+
+#         # 5. 模态判断
+#         def mod(enc, imgs):
+#             return ["image,text" if txt.ne(0).any().item() and img is not None else
+#                     "image" if img is not None else "text"
+#                     for txt, img in zip(enc.input_ids, imgs)]
+#         query_mod = mod(query_enc, query_imgs)
+#         target_mod= mod(target_enc, target_imgs)
+#         query_type = query_mod[0]
+#         target_type = target_mod[0]
+#         for i in range(len(batch)):
+#             q_idx = query_idxs[i]
+#             c_idx = targ_idxs[i]
+#             print(f'[DEBUG COLLATE] '
+#                 f'qIdx={i} qTxt="{query_txts[i][:50]}" qImg={query_imgs[i]} '
+#                 f'cIdx={i} cTxt="{target_txts[i][:50]}" cImg={target_imgs[i]}')
+#         print('[DEBUG COLLATE] ---------- end batch ----------')
+#         # 6. 组装模型 forward 字典
+#         return {
+#             "query_type"  : query_mod,          # 列表，各样本可能不同
+#             "target_type" : target_mod,
+#             "task_label"  : "retrieval",
+#             "return_loss" : True,
+
+#             "query_input_ids"      : query_enc.input_ids,
+#             "query_attention_mask" : query_enc.attention_mask,
+#             "query_pixel_values"   : query_imgs,        # List[PIL|None]
+#             "query_image_grid_thw" : None,
+
+#             "target_input_ids"     : target_enc.input_ids,
+#             "target_attention_mask": target_enc.attention_mask,
+#             "target_pixel_values"  : target_imgs,       # List[PIL|None]
+#             "target_image_grid_thw": None,
+
+#             # Trainer 占位符
+#             "input_ids"             : None,
+#             "attention_mask"        : None,
+#             "inputs_embeds"         : None,
+#             "output_attentions"     : None,
+#             "output_hidden_states"  : None,
+#             "return_dict"           : None,
+#         }
+
+#     # 让 __call__ 直接转发
+#     __call__ = collate_for_forward
+# class JinaV4Collator(MBEIRMainCollator):
+#     """
+#     只产「字符串 + PIL」+ 模态标签，图像编码完全推迟到模型内部。
+#     分别 tokenize query / target，确保长度正确。
+#     """
+
+#     def __init__(self, tokenizer, image_size, mode):
+#         super().__init__(tokenizer=tokenizer, image_size=image_size, mode=mode)
+
+#     # ==================== 唯一对外接口 ====================
+#     def collate_for_forward(self, batch) -> Dict[str, Any]:
+#         # 1. 让父类把图像统一变成 List[PIL]，并告诉我们每张图对应哪个样本的哪个字段
+#         blip_batch = super().__call__(batch)
+#         print("[blip_batch]",blip_batch)
+        
+#         images = blip_batch["image_batched"]  # List[PIL|None]  扁平
+#         idx_map = blip_batch["index_mapping"]  # {"query": [...], "pos_cand": [...]}
+
+#         # 2. 根据 idx_map 把图像取出来；如果某样本没有图，idx 为 None
+#         def _get_img(idx):
+#             return images[idx] if idx is not None else None
+
+#         query_imgs = [_get_img(idx) for idx in idx_map["query"]]
+#         target_imgs = [_get_img(idx) for idx in idx_map["pos_cand"]]
+
+#         # 3. 抽文本；空文本给 ""，防止 tokenizer 把 None 变成 "None"
+#         query_txts = [inst["query"]["txt"] or "" for inst in batch]
+#         target_txts = [inst["pos_cand"]["txt"] or "" for inst in batch]
+
+#         # 4. 分别 tokenize
+#         query_enc = self.tokenizer(
+#             query_txts, return_tensors="pt", padding=True, truncation=True
+#         )
+#         target_enc = self.tokenizer(
+#             target_txts, return_tensors="pt", padding=True, truncation=True
+#         )
+
+#         # 5. 模态判断：图文都存在 → "image,text"；只有图 → "image"；只有文 → "text"
+#         def _modality(txt_ids, img):
+#             has_txt = txt_ids.ne(0).any().item()
+#             has_img = img is not None
+#             if has_img and has_txt:
+#                 return "image,text"
+#             return "image" if has_img else "text"
+
+#         query_mod = [_modality(q, qi) for q, qi in zip(query_enc.input_ids, query_imgs)]
+#         target_mod = [_modality(t, ti) for t, ti in zip(target_enc.input_ids, target_imgs)]
+
+#         # 6. 组装 forward 字典
+#         return {
+#             "query_type": query_mod,  # 列表，各样本可能不同
+#             "target_type": target_mod,
+#             "task_label": "retrieval",
+#             "return_loss": True,
+
+#             "query_input_ids": query_enc.input_ids,
+#             "query_attention_mask": query_enc.attention_mask,
+#             "query_pixel_values": query_imgs,  # List[PIL|None]
+#             "query_image_grid_thw": None,
+
+#             "target_input_ids": target_enc.input_ids,
+#             "target_attention_mask": target_enc.attention_mask,
+#             "target_pixel_values": target_imgs,
+#             "target_image_grid_thw": None,
+
+#             # Trainer 占位符
+#             "input_ids": None,
+#             "attention_mask": None,
+#             "inputs_embeds": None,
+#             "output_attentions": None,
+#             "output_hidden_states": None,
+#             "return_dict": None,
+#         }
+
+#     __call__ = collate_for_forward
 class JinaV4Collator(MBEIRMainCollator):
     """
     只产「字符串 + PIL」+ 模态标签，图像编码完全推迟到模型内部。
@@ -620,29 +786,51 @@ class JinaV4Collator(MBEIRMainCollator):
 
         query_enc  = self.tokenizer(query_txts,  return_tensors="pt", padding=True)
         target_enc = self.tokenizer(target_txts, return_tensors="pt", padding=True)
-
+        query_mod  = [inst["query"]["modality"]    for inst in batch]
+        target_mod = [inst["pos_cand"]["modality"] for inst in batch]
         # 4. 模态判断（同之前）
-        def mod(enc, imgs):
-            return ["image,text" if txt.ne(0).any().item() and img is not None else
-                    "image" if img is not None else "text"
-                    for txt, img in zip(enc.input_ids, imgs)]
-        query_mod = mod(query_enc, query_imgs)
-        target_mod= mod(target_enc, target_imgs)
-
+        # def mod(enc, imgs):
+        #     return ["image,text" if txt.ne(0).any().item() and img is not None else
+        #             "image" if img is not None else "text"
+        #             for txt, img in zip(enc.input_ids, imgs)]
+        # query_mod = mod(query_enc, query_imgs)
+        # target_mod= mod(target_enc, target_imgs)
+        for i in range(len(batch)):
+            q_idx = query_idxs[i]
+            c_idx = targ_idxs[i]
+            # print(f'[DEBUG COLLATE] '
+            #     f'qIdx={i} qTxt="{query_txts[i][:50]}" qImg={query_imgs[i]} '
+            #     f'cIdx={i} cTxt="{target_txts[i][:50]}" cImg={target_imgs[i]}')
+            
+        
+        # 3. 重新分别 tokenize 文本 ...... 之后加
+        for i in range(len(batch)):
+            qid   = batch[i]["query"]["qid"]
+            pos_did= batch[i]["pos_cand"]["did"]
+            # print(f'[COLLATOR] batch_idx={i}  qid={qid}  pos_did={pos_did}')
+            # print(f'qMod={query_mod[i]}  tMod={target_mod[i]}')
+            # print('[DEBUG COLLATE] ---------- end batch ----------')
         # 5. 组装模型 forward 字典
+        qid_list   = [batch[i]['query']['qid']        for i in range(len(batch))]
+        did_list   = [batch[i]['pos_cand']['did']     for i in range(len(batch))]
+        # for i in range(min(4, len(batch))):
+        #     qid = batch[i]['query']['qid']
+        #     did = batch[i]['pos_cand']['did']
+        #     print(f'[collator] i={i}  qid={qid}  did={did}')
+        
         return {
-            "query_type"  : query_mod[0],   # 整批同一模态即可
-            "target_type" : target_mod[0],
+            "query_type"  : query_mod,   # list
+            "target_type" : target_mod,
             "task_label"  : "retrieval",
             "return_loss" : True,
 
-            "query_input_ids"      : query_enc.input_ids,
-            "query_attention_mask" : query_enc.attention_mask,
+            "query_input_ids"      : query_txts,
+            "query_attention_mask" : None, #query_enc.attention_mask,
             "query_pixel_values"   : query_imgs,        # List[PIL|None]
             "query_image_grid_thw" : None,
 
-            "target_input_ids"     : target_enc.input_ids,
-            "target_attention_mask": target_enc.attention_mask,
+            "target_input_ids"     : target_txts,
+            "target_attention_mask": None, #target_enc.attention_mask,
             "target_pixel_values"  : target_imgs,       # List[PIL|None]
             "target_image_grid_thw": None,
 
@@ -653,10 +841,109 @@ class JinaV4Collator(MBEIRMainCollator):
             "output_attentions"     : None,
             "output_hidden_states"  : None,
             "return_dict"           : None,
+
+            #"tokenizer": self.tokenizer,
+
+            # >>> 调试用：把 id 带回 batch
+            "hashed_qid" : torch.LongTensor([hash(q) & 0x7FFFFFFF for q in qid_list]),
+            "hashed_p_did":torch.LongTensor([hash(d) & 0x7FFFFFFF for d in did_list]),
         }
 
     # 让 __call__ 直接转发
     __call__ = collate_for_forward
+# zhengque 
+#class JinaV4Collator(MBEIRMainCollator):
+#     """
+#     只产「字符串 + PIL」+ 模态标签，图像编码完全推迟到模型内部。
+#     而是分别 tokenize query / target，确保长度正确。
+#     """
+#     def __init__(self, tokenizer, image_size, mode):
+#         super().__init__(tokenizer=tokenizer, image_size=image_size, mode=mode)
+
+#     # ==================== 唯一对外接口 ====================
+#     def collate_for_forward(self, batch) -> Dict[str, Any]:
+#         # 1. 让父类跑完采样 → 只拿图像 + 索引映射，文本我们重新 tokenize
+#         blip_batch = super().__call__(batch)
+#         images        = blip_batch["image_batched"]          # List[PIL] 扁平
+#         idx_map       = blip_batch["index_mapping"]          # 用于抽图像
+
+#         # 2. 抽取图像（同之前逻辑）
+#         query_idxs = [idx_map["query"][i][0]    for i in range(len(batch))]
+#         targ_idxs  = [idx_map["pos_cand"][i][0] for i in range(len(batch))]
+#         query_imgs = [images[i] for i in query_idxs]
+#         target_imgs= [images[i] for i in targ_idxs]
+
+#         # 3. 重新分别 tokenize 文本（保证长度精确）
+#         query_txts  = [inst["query"]["txt"]      for inst in batch]
+#         target_txts = [inst["pos_cand"]["txt"]   for inst in batch]
+
+#         query_enc  = self.tokenizer(query_txts,  return_tensors="pt", padding=True)
+#         target_enc = self.tokenizer(target_txts, return_tensors="pt", padding=True)
+#         query_mod  = [inst["query"]["modality"]    for inst in batch]
+#         target_mod = [inst["pos_cand"]["modality"] for inst in batch]
+#         # 4. 模态判断（同之前）
+#         # def mod(enc, imgs):
+#         #     return ["image,text" if txt.ne(0).any().item() and img is not None else
+#         #             "image" if img is not None else "text"
+#         #             for txt, img in zip(enc.input_ids, imgs)]
+#         # query_mod = mod(query_enc, query_imgs)
+#         # target_mod= mod(target_enc, target_imgs)
+#         for i in range(len(batch)):
+#             q_idx = query_idxs[i]
+#             c_idx = targ_idxs[i]
+#             # print(f'[DEBUG COLLATE] '
+#             #     f'qIdx={i} qTxt="{query_txts[i][:50]}" qImg={query_imgs[i]} '
+#             #     f'cIdx={i} cTxt="{target_txts[i][:50]}" cImg={target_imgs[i]}')
+            
+        
+#         # 3. 重新分别 tokenize 文本 ...... 之后加
+#         for i in range(len(batch)):
+#             qid   = batch[i]["query"]["qid"]
+#             pos_did= batch[i]["pos_cand"]["did"]
+#             # print(f'[COLLATOR] batch_idx={i}  qid={qid}  pos_did={pos_did}')
+#             # print(f'qMod={query_mod[i]}  tMod={target_mod[i]}')
+#             # print('[DEBUG COLLATE] ---------- end batch ----------')
+#         # 5. 组装模型 forward 字典
+#         qid_list   = [batch[i]['query']['qid']        for i in range(len(batch))]
+#         did_list   = [batch[i]['pos_cand']['did']     for i in range(len(batch))]
+#         # for i in range(min(4, len(batch))):
+#         #     qid = batch[i]['query']['qid']
+#         #     did = batch[i]['pos_cand']['did']
+#         #     print(f'[collator] i={i}  qid={qid}  did={did}')
+        
+#         return {
+#             "query_type"  : query_mod,   # list
+#             "target_type" : target_mod,
+#             "task_label"  : "retrieval",
+#             "return_loss" : True,
+
+#             "query_input_ids"      : query_enc.input_ids,
+#             "query_attention_mask" : query_enc.attention_mask,
+#             "query_pixel_values"   : query_imgs,        # List[PIL|None]
+#             "query_image_grid_thw" : None,
+
+#             "target_input_ids"     : target_enc.input_ids,
+#             "target_attention_mask": target_enc.attention_mask,
+#             "target_pixel_values"  : target_imgs,       # List[PIL|None]
+#             "target_image_grid_thw": None,
+
+#             # Trainer 占位符
+#             "input_ids"             : None,
+#             "attention_mask"        : None,
+#             "inputs_embeds"         : None,
+#             "output_attentions"     : None,
+#             "output_hidden_states"  : None,
+#             "return_dict"           : None,
+
+#             #"tokenizer": self.tokenizer,
+
+#             # >>> 调试用：把 id 带回 batch
+#             "hashed_qid" : torch.LongTensor([hash(q) & 0x7FFFFFFF for q in qid_list]),
+#             "hashed_p_did":torch.LongTensor([hash(d) & 0x7FFFFFFF for d in did_list]),
+#         }
+
+#     # 让 __call__ 直接转发
+#     __call__ = collate_for_forward
 
 class MBEIRInferenceOnlyCollator(MBEIRCollatorBase):
     def __init__(self, tokenizer: Callable[[List[str]], Any], image_size: tuple):
@@ -724,7 +1011,8 @@ class MBEIRCandidatePoolCollator(MBEIRCollatorBase):
                 did_list.append(did)
 
         processed_batch = {
-            "txt_batched": self.tokenizer(txt_list),
+            "txt_batched": txt_list,
+            #"txt_batched": self.tokenizer(txt_list),
             # "image_batched": torch.stack(img_list, dim=0),
             "image_batched": img_list,
             "txt_mask_batched": torch.tensor(txt_mask_list, dtype=torch.long),
