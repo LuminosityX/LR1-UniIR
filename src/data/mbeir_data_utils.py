@@ -9,8 +9,10 @@ from data.mbeir_dataset import (
     MBEIRMainCollator,
     MBEIRCandidatePoolCollator,
     Mode,
+    JinaV4Collator,
 )
 
+# -----------------------------------------------------------------------
 
 class DatasetType(Enum):
     MAIN_TRAIN = "main_train"
@@ -20,7 +22,6 @@ class DatasetType(Enum):
 
 def build_mbeir_dataset_from_config(config, img_preprocess_fn, tokenizer, dataset_type):
     data_config = config.data_config
-    ### 构建候选池数据集与其 collator
     if dataset_type == DatasetType.CAND:
         cand_pool_dataset = MBEIRCandidatePoolDataset(
             mbeir_data_dir=config.mbeir_data_dir,
@@ -33,13 +34,12 @@ def build_mbeir_dataset_from_config(config, img_preprocess_fn, tokenizer, datase
         )
         return cand_pool_dataset, cand_pool_collator
 
-    ### 主训练/验证两种场景的路径与模式
     if dataset_type == DatasetType.MAIN_TRAIN:
         query_data_path = data_config.train_query_data_path
         cand_pool_path = data_config.train_cand_pool_path
-        ### 训练模式: "train" or "eval"
         mode = Mode.TRAIN
         hard_neg_num = data_config.hard_neg_num
+
     elif dataset_type == DatasetType.IN_BATCH_VAL:
         # Note: This validation dataset is used for in-batch validation.
         query_data_path = data_config.val_query_data_path
@@ -67,7 +67,9 @@ def build_mbeir_dataset_from_config(config, img_preprocess_fn, tokenizer, datase
         image_size=tuple(map(int, data_config.image_size.split(","))),
         mode=mode,
     )
+
     return dataset, collector
+
 
 
 def build_distributed_sampler_list(dataset_list, shuffle_list, num_tasks_list, global_rank_list):
