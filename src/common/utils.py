@@ -147,6 +147,13 @@ def build_model_from_config(config):
         assert os.path.exists(checkpoint_path), f"Checkpoint file {checkpoint_path} does not exist."
         print(f"loading BLIPFeatureFusion checkpoint from {checkpoint_path}")
         model.load_state_dict(torch.load(checkpoint_path)["model"])
+    elif model_name == "JinaEmbeddingsV4Model":
+        from transformers import AutoModel
+
+        model_config = config.model
+        # Initialize the model
+        model = AutoModel.from_pretrained(model_config.original_model_name, trust_remote_code=True, torch_dtype=torch.float16)
+
     else:
         raise NotImplementedError(f"Model {model_name} is not implemented.")
         # Notes: Add other models here

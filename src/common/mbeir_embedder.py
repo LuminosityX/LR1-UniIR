@@ -212,6 +212,7 @@ def generate_embeds_for_config(model, img_preprocess_fn, tokenizer, config):
     for split_name in dataset_types:
         split_dir_name = getattr(data_config, f"{split_name}_dir_name")
         embed_dataset_config = getattr(embed_config, f"{split_name}_datasets_config", None)
+        ### only embed if enabled (now is test split)
         if embed_dataset_config and embed_dataset_config.enable_embed:
             dataset_name_list = getattr(embed_dataset_config, "datasets_name", None)
             cand_pool_name_list = getattr(embed_dataset_config, "correspond_cand_pools_name", None)
@@ -471,6 +472,7 @@ def main(config):
     model.eval()
 
     # Ensure the model has an 'encode' method before generating embeddings
+    ### 要为jina v4模型添加encode_mbeir_batch等方法
     if not callable(getattr(model, "encode_mbeir_batch")):
         raise AttributeError("The provided model does not have a callable 'encode' method.")
     if not callable(getattr(model, "get_img_preprocess_fn")):
