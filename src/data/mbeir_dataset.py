@@ -177,6 +177,7 @@ class MBEIRMainDataset(MBEIRDatasetBase):
     def _load_cand_pool_as_dict(self, cand_pool_data_path):
         self._load_cand_pool(cand_pool_data_path)
         cand_pool_dict = {}
+        ### cand_pool example: {"txt": null, "img_path": "mbeir_images/fashion200k_images/tops/blouses/56925626/56925626_2.jpg", "modality": "image", "did": "1:2", "src_content": null}
         for cand_pool_entry in self.cand_pool:
             did = cand_pool_entry.get("did")
             assert did, f"Cannot find did for {cand_pool_entry}"
@@ -196,6 +197,7 @@ class MBEIRMainDataset(MBEIRDatasetBase):
     def __getitem__(self, index):
         """Retrieve an item from the dataset by index."""
         ### jsonl文件中的每一行
+        ### example: {"qid": "9:6", "query_txt": null, "query_img_path": "mbeir_images/mscoco_images/val2014/COCO_val2014_000000391895.jpg", "query_modality": "image", "query_src_content": null, "pos_cand_list": ["9:2", "9:3", "9:4", "9:5", "9:6"], "neg_cand_list": [], "task_id": 3}
         mbeir_entry = self.query_data[index]
 
         ### 读取一条查询：文本、图像路径、查询模态、qid 以及数据集 ID（从 qid 前缀派生）。
@@ -261,6 +263,9 @@ class MBEIRMainDataset(MBEIRDatasetBase):
 
         ### 小工具：按需加载图像并返回结构化字典。
         def _prepare_data_dict(txt, img_path):
+            ### _load_and_preprocess_image里对image的操作
+            ### image = Image.open(full_query_img_path).convert("RGB")
+            ### image = self.img_preprocess_fn(image)
             img = self._load_and_preprocess_image(img_path)
             return {"txt": txt, "img": img}
 
@@ -268,6 +273,7 @@ class MBEIRMainDataset(MBEIRDatasetBase):
             (query_txt_with_prompt if self.enable_query_instruct else query_txt_without_prompt),
             query_img_path,
         )
+        ### query = {"txt": txt, "img": img}
         instance = {"query": query}
 
         ### 评估模式下可返回哈希后的 qid 与 task_id，便于对齐/分析。
@@ -301,6 +307,7 @@ class MBEIRMainDataset(MBEIRDatasetBase):
             ]
             if len(neg_cand_list) > 0:
                 instance.update({"neg_cand_list": neg_cand_list})
+        ### 返回的instance里面文本还依旧只是字符串，图像是img_preprocess_fn处理后的。
         return instance
 
 ### 推理专用数据集：MBEIRInferenceOnlyDataset
@@ -417,6 +424,7 @@ class MBEIRCandidatePoolDataset(MBEIRDatasetBase):
         return len(self.cand_pool)
 
     def __getitem__(self, index):
+        ### example of self.cand_pool[index]: {"txt": null, "img_path": "mbeir_images/fashion200k_images/tops/blouses/56925626/56925626_2.jpg", "modality": "image", "did": "1:2", "src_content": null}
         mbeir_cand_pool_entry = self.cand_pool[index]
         img_path = mbeir_cand_pool_entry.get("img_path", None)
         img = self._load_and_preprocess_image(img_path)
@@ -520,6 +528,7 @@ class MBEIRMainCollator(MBEIRCollatorBase):
         ### 核心：遍历 batch 中的每个样本/每个子键（query/pos/neg…），将条目扁平化追加，并记录它在扁平批次中的位置。
         counter = 0
         for inst_idx, instance in enumerate(batch):
+            ### instance_keys = ["query", "pos_cand"(if any), "neg_cand_list"(if any)]
             for instance_key in instance_keys:
                 items = [instance[instance_key]] if instance_key != "neg_cand_list" else instance[instance_key]  # list
                 for item in items:
@@ -528,6 +537,7 @@ class MBEIRMainCollator(MBEIRCollatorBase):
 
                     index_mapping[instance_key][inst_idx].append(counter)  # Track current index
                     counter += 1
+                    ### txt_mask/img_mask：1=有模态，0=无模态
                     padded_txt, txt_mask = self._get_padded_text_with_mask(txt)
                     padded_img, img_mask = self._get_padded_image_with_mask(img)
                     txt_list.append(padded_txt)

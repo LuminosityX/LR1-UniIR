@@ -47,6 +47,9 @@ SCRIPT_NAME="mbeir_embedder.py"
 echo "CONFIG_PATH: $CONFIG_PATH"
 echo "SCRIPT_NAME: $SCRIPT_NAME"
 
+### this python code is to do the following yaml updates:
+### yaml_data["experiment"]["instruct_status"] = "Instruct"
+### yaml_data["data_config"]["enable_query_instruct"] = True
 python config_updater.py \
     --update_mbeir_yaml_instruct_status \
     --mbeir_yaml_file_path $CONFIG_PATH \

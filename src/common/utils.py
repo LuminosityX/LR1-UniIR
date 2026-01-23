@@ -148,11 +148,22 @@ def build_model_from_config(config):
         print(f"loading BLIPFeatureFusion checkpoint from {checkpoint_path}")
         model.load_state_dict(torch.load(checkpoint_path)["model"])
     elif model_name == "JinaEmbeddingsV4Model":
-        from transformers import AutoModel
+        from models.jina_v4.jina_v4.modeling_jina_embeddings_v4 import JinaEmbeddingsV4Model
 
         model_config = config.model
-        # Initialize the model
-        model = AutoModel.from_pretrained(model_config.original_model_name, trust_remote_code=True, torch_dtype=torch.float16)
+        # Initialize the model using the custom from_pretrained method
+        model = JinaEmbeddingsV4Model.from_pretrained(
+            model_config.original_model_name,
+            trust_remote_code=True,
+            torch_dtype=torch.float16,
+        )
+
+        # Set MBEIR-specific attributes
+        model.mbeir_task_label = getattr(model_config, 'mbeir_task_label', 'retrieval')
+        model.mbeir_image_size = tuple(map(int, config.data_config.image_size.split(",")))
+        model.mbeir_max_text_length = getattr(model_config, 'mbeir_max_text_length', 512)
+        # Set the task for LoRA adapter selection
+        model.task = model.mbeir_task_label
 
     else:
         raise NotImplementedError(f"Model {model_name} is not implemented.")

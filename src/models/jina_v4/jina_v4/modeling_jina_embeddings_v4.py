@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 from functools import partial
 from io import BytesIO
-from typing import Any, Callable, ClassVar, Dict, List, Optional, Union, cast
+from typing import Any, Callable, ClassVar, Dict, List, Optional, Tuple, Union, cast
 
 import numpy as np
 import requests
@@ -117,6 +117,74 @@ class JinaEmbeddingsV4Processor(Qwen2_5_VLProcessor):
         )
 
         return text_batch
+    
+    ### add process_multimodal method
+    def process_multimodal(
+        self,
+        images: List[Image.Image],
+        texts: List[str],
+        max_length: Optional[int] = None,
+        prefix: Optional[str] = None,
+    ) -> BatchFeature:
+        """
+        Process multimodal (image + text) inputs using Jina V4's native format.
+
+        Creates prompts in the format:
+        <|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{text}<|im_end|>\n
+
+        Args:
+            images: List of PIL Images
+            texts: List of text strings (one per image)
+            max_length: Maximum token length
+            prefix: Optional prefix for text (e.g., "Query")
+
+        Returns:
+            BatchFeature with input_ids, attention_mask, pixel_values, image_grid_thw
+        """
+        max_length = (
+            self.text_max_length
+            if max_length is None
+            else min(max_length, self.text_max_length)
+        )
+
+        # Construct multimodal prompts
+        text_prompts = []
+        for text in texts:
+            if prefix:
+                text = f"{prefix}: {text}"
+            # Format: image placeholder + text content
+            prompt = f"<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{text}<|im_end|>\n"
+            text_prompts.append(prompt)
+
+        # Process with both text and images
+        batch = self(
+            text=text_prompts,
+            images=images,
+            padding="longest",
+            max_length=max_length,
+            truncation=True,
+            return_tensors="pt",
+        )
+
+        # Handle pixel_values padding (same as process_images)
+        offsets = batch["image_grid_thw"][:, 1] * batch["image_grid_thw"][:, 2]
+        pixel_values = torch.split(batch["pixel_values"], offsets.tolist())
+        max_pv_length = max([len(pv) for pv in pixel_values])
+
+        pixel_values = [
+            torch.cat([
+                pv,
+                torch.zeros(
+                    (max_pv_length - len(pv), pv.shape[1]),
+                    dtype=pv.dtype,
+                    device=pv.device,
+                ),
+            ])
+            for pv in pixel_values
+        ]
+        batch["pixel_values"] = torch.stack(pixel_values)
+
+        return batch
 
 
 @dataclass
@@ -267,25 +335,250 @@ class JinaEmbeddingsV4Model(Qwen2_5_VLForConditionalGeneration):
     def _input_has_image(self, input_ids):
         return self.config.vision_start_token_id in input_ids
 
-    def forward(
+    ### ==================== MBEIR Interface Methods ====================
+    
+    def get_img_preprocess_fn(self):
+        """
+        Returns image preprocessing function that preserves raw pixel values.
+
+        Only resizes and converts to tensor - NO normalization.
+        This allows simple, lossless conversion back to PIL for Jina V4's native processing.
+
+        Note: We use ToTensor() to satisfy UniIR collator's torch.stack() requirement.
+        The conversion back to PIL via to_pil_image() is lossless since no normalization is applied.
+        """
+        from torchvision import transforms
+
+        def img_preprocess_wrapper(image: Image.Image) -> torch.Tensor:
+            target_size = getattr(self, 'mbeir_image_size', (224, 224))
+            if isinstance(target_size, int):
+                target_size = (target_size, target_size)
+
+            # Only resize and convert to tensor - NO normalization
+            # This allows lossless conversion back to PIL in encode_mbeir_batch()
+            transform = transforms.Compose([
+                transforms.Resize(target_size),
+                transforms.ToTensor(),  # Converts to [0, 1] range, required for collator's torch.stack()
+            ])
+            return transform(image)
+
+        return img_preprocess_wrapper
+
+    def get_tokenizer(self):
+        """
+        Returns a passthrough function that preserves raw text strings.
+
+        The collator expects a callable that returns something with len().
+        We return a simple wrapper class that stores raw strings for later
+        processing by Jina V4's native process_texts() method.
+        """
+        class RawTextBatch:
+            """Wrapper to store raw text strings for later processing."""
+            def __init__(self, texts: List[str]):
+                self.texts = texts
+
+            def __len__(self):
+                return len(self.texts)
+
+            def __getitem__(self, idx):
+                if isinstance(idx, list):
+                    return [self.texts[i] for i in idx]
+                return self.texts[idx]
+
+        def passthrough_wrapper(texts: List[str]) -> RawTextBatch:
+            return RawTextBatch(texts)
+
+        return passthrough_wrapper
+
+    def encode_mbeir_batch(self, batch: Dict[str, Any]) -> Tuple[torch.Tensor, List[int]]:
+        """
+        Encode a batch from UniIR MBEIR dataset using Jina V4's native processing.
+
+        Handles three modality cases:
+        - Text-only: txt_mask=1, image_mask=0
+        - Image-only: txt_mask=0, image_mask=1
+        - Multimodal: txt_mask=1, image_mask=1 (uses native image-text concatenation)
+
+        Args:
+            batch: Dictionary containing:
+                - txt_batched: RawTextBatch containing raw strings (not tokenized)
+                - image_batched: Image tensors [batch_size, 3, H, W] in [0, 1] range (not normalized)
+                - txt_mask_batched: Text presence mask [batch_size]
+                - image_mask_batched: Image presence mask [batch_size]
+                - did_list or qid_list: List of hashed IDs
+
+        Returns:
+            Tuple of (embeddings tensor [batch_size, embed_dim], id_list)
+        """
+        ### encode_mbeir_batch 是eval进入的函数，所以必然有did_list or qid_list
+        id_list = batch.get("did_list") or batch.get("qid_list")
+        if id_list is None:
+            raise ValueError("id_list (did_list or qid_list) not found in batch.")
+
+        txt_batched = batch["txt_batched"]
+        image_batched = batch["image_batched"]
+        txt_mask = batch["txt_mask_batched"]
+        image_mask = batch["image_mask_batched"]
+
+        batch_size = image_batched.size(0)
+        ### ？ 这里image_batched有放到cuda上吗？
+        device = image_batched.device
+        task_label = getattr(self, 'mbeir_task_label', 'retrieval')
+
+        # Group indices by modality
+        text_only_idx, image_only_idx, multimodal_idx = [], [], []
+        for i in range(batch_size):
+            has_text = txt_mask[i].item() == 1
+            has_image = image_mask[i].item() == 1
+            if has_text and has_image:
+                multimodal_idx.append(i)
+            elif has_image:
+                image_only_idx.append(i)
+            elif has_text:
+                text_only_idx.append(i)
+
+        embed_dim = self.config.text_config.hidden_size
+        embeddings = torch.zeros(batch_size, embed_dim, device=device)
+
+        # Process each modality group
+        if text_only_idx:
+            embeddings[text_only_idx] = self._encode_text_batch(txt_batched, text_only_idx, task_label, device)
+        if image_only_idx:
+            embeddings[image_only_idx] = self._encode_image_batch(image_batched, image_only_idx, task_label, device)
+        if multimodal_idx:
+            embeddings[multimodal_idx] = self._encode_multimodal_batch(txt_batched, image_batched, multimodal_idx, task_label, device)
+
+        return embeddings, id_list
+
+    def _encode_text_batch(
+        self,
+        txt_batched,  # RawTextBatch
+        indices: List[int],
+        task_label: str,
+        device: torch.device
+    ) -> torch.Tensor:
+        """Encode text-only samples using Jina V4's native process_texts."""
+        # Extract raw text strings from RawTextBatch
+        texts = txt_batched[indices]
+
+        # Use Jina V4's native text processing
+        processed = self.processor.process_texts(texts)
+        processed = {k: v.to(device) for k, v in processed.items()}
+
+        output = self._forward_embeddings(task_label=task_label, **processed)
+        return output.single_vec_emb
+
+    def _encode_image_batch(
+        self,
+        image_batched: torch.Tensor,  # [B, 3, H, W], range [0, 1] (not normalized)
+        indices: List[int],
+        task_label: str,
+        device: torch.device
+    ) -> torch.Tensor:
+        """Encode image-only samples using Jina V4's native process_images."""
+        from torchvision.transforms.functional import to_pil_image
+
+        # Convert unnormalized tensors to PIL (simple, no denormalization needed)
+        pil_images = [to_pil_image(image_batched[idx].cpu()) for idx in indices]
+
+        # Use Jina V4's native image processing
+        processed = self.processor.process_images(pil_images)
+        processed = {k: v.to(device) for k, v in processed.items()}
+
+        output = self._forward_embeddings(task_label=task_label, **processed)
+        return output.single_vec_emb
+
+    def _encode_multimodal_batch(
+        self,
+        txt_batched,  # RawTextBatch
+        image_batched: torch.Tensor,  # [B, 3, H, W], range [0, 1] (not normalized)
+        indices: List[int],
+        task_label: str,
+        device: torch.device
+    ) -> torch.Tensor:
+        """
+        Encode multimodal samples using Jina V4's native process_multimodal.
+
+        Uses format: <|vision_start|><|image_pad|><|vision_end|>{text}
+        """
+        from torchvision.transforms.functional import to_pil_image
+
+        # Convert unnormalized tensors to PIL (simple, no denormalization needed)
+        pil_images = [to_pil_image(image_batched[idx].cpu()) for idx in indices]
+
+        # Extract raw text strings from RawTextBatch (no decoding needed)
+        texts = txt_batched[indices]
+
+        # Use Jina V4's native multimodal processing
+        processed = self.processor.process_multimodal(pil_images, texts)
+        processed = {k: v.to(device) for k, v in processed.items()}
+
+        output = self._forward_embeddings(task_label=task_label, **processed)
+        return output.single_vec_emb
+
+    def _forward_embeddings(
         self,
         task_label: Union[str, List[str]],
-        input_ids: torch.LongTensor,
-        attention_mask: torch.Tensor,
-        output_vlm_last_hidden_states: bool = False,
+        input_ids: torch.LongTensor = None,
+        attention_mask: torch.Tensor = None,
         **kwargs,
     ) -> JinaEmbeddingsV4ModelOutput:
         """
+        Internal forward pass for embedding generation.
+        This is the original forward logic, separated to avoid recursion with encode_mbeir_batch.
+        """
+        # Forward pass through the VLM
+        hidden_states = self.get_last_hidden_states(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            task_label=task_label,
+            **kwargs,
+        )  # (batch_size, seq_length, hidden_size)
+        # Compute the embeddings
+        single_vec_emb = self.get_single_vector_embeddings(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            input_ids=input_ids,
+        )
+        multi_vec_emb = self.get_multi_vector_embeddings(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            task_label=task_label,
+        )
+
+        return JinaEmbeddingsV4ModelOutput(
+            vlm_last_hidden_states=None,
+            single_vec_emb=single_vec_emb,
+            multi_vec_emb=multi_vec_emb,
+        )
+
+    ### ==================== End MBEIR Interface Methods ====================
+
+    def forward(
+        self,
+        task_label: Union[str, List[str]] = None,
+        input_ids: torch.LongTensor = None,
+        attention_mask: torch.Tensor = None,
+        output_vlm_last_hidden_states: bool = False,
+        encode_mbeir_batch: bool = False,
+        **kwargs,
+    ) -> Union[JinaEmbeddingsV4ModelOutput, Tuple[torch.Tensor, List[int]]]:
+        """
         Forward pass through the model. Returns both single-vector and multi-vector embeddings.
         Args:
+            task_label: Task identifier for LoRA adapter selection
             input_ids (torch.Tensor): The input tokens tensor.
             attention_mask (torch.Tensor): The attention mask tensor.
+            output_vlm_last_hidden_states: Whether to return hidden states
+            encode_mbeir_batch: If True, use MBEIR batch encoding mode (kwargs contains batch dict)
         Returns:
-            JinaEmbeddingsV4ModelOutput:
-                vlm_last_hidden_states (torch.Tensor, optional): Last hidden states of the VLM.
-                single_vec_emb (torch.Tensor, optional): Single-vector embeddings.
-                multi_vec_emb (torch.Tensor, optional): Multi-vector embeddings.
+            JinaEmbeddingsV4ModelOutput or (embeddings, id_list) if encode_mbeir_batch
         """
+        # Handle MBEIR batch encoding mode
+        if encode_mbeir_batch:
+            # kwargs contains the batch dict when called from mbeir_embedder
+            return self.encode_mbeir_batch(kwargs)
+
         # Forward pass through the VLM
         hidden_states = self.get_last_hidden_states(
             input_ids=input_ids,
@@ -425,6 +718,7 @@ class JinaEmbeddingsV4Model(Qwen2_5_VLForConditionalGeneration):
     ) -> Union[List[torch.Tensor], torch.Tensor]:
         """
         Encodes a list of texts into embeddings.
+
         Args:
             texts: text or list of text strings to encode
             max_length: Maximum token length for text processing
@@ -433,9 +727,11 @@ class JinaEmbeddingsV4Model(Qwen2_5_VLForConditionalGeneration):
             return_numpy: Whether to return numpy arrays instead of torch tensors
             truncate_dim: Dimension to truncate embeddings to (128, 256, 512, or 1024)
             prompt_name: Type of text being encoded ('query' or 'passage')
+
         Returns:
             List of text embeddings as tensors or numpy arrays when encoding multiple texts, or single text embedding as tensor when encoding a single text
         """
+        ### 默认为 “query” 前缀；做前缀/截断校验。
         prompt_name = prompt_name or "query"
         encode_kwargs = self._validate_encoding_params(
             truncate_dim=truncate_dim, prompt_name=prompt_name
@@ -501,6 +797,7 @@ class JinaEmbeddingsV4Model(Qwen2_5_VLForConditionalGeneration):
     ) -> Union[List[torch.Tensor], torch.Tensor]:
         """
         Encodes a list of images or a single image into embedding(s).
+
         Args:
             images: image(s) to encode, can be PIL Image(s), URL(s), or local file path(s)
             batch_size: Number of images to process at once
@@ -508,14 +805,18 @@ class JinaEmbeddingsV4Model(Qwen2_5_VLForConditionalGeneration):
             return_numpy: Whether to return numpy arrays instead of torch tensors. If `return_multivector` is `True` and more than one image is encoded, this parameter is ignored.
             truncate_dim: Dimension to truncate embeddings to (128, 256, 512, or 1024)
             max_pixels: Maximum number of pixels to process per image
+
         Returns:
             List of image embeddings as tensors or numpy arrays when encoding multiple images, or single image embedding as tensor when encoding a single image
         """
+        ### max_pixels：临时覆盖处理器的图像像素上限（防止超大图OOM）
+        ### 临时改写最大像素限制（编码结束会还原）。
         if max_pixels:
             default_max_pixels = self.processor.image_processor.max_pixels
             self.processor.image_processor.max_pixels = (
                 max_pixels  # change during encoding
             )
+        ### text中会有prefix，image没有
         encode_kwargs = self._validate_encoding_params(truncate_dim=truncate_dim)
         task = self._validate_task(task)
 
@@ -545,6 +846,7 @@ class JinaEmbeddingsV4Model(Qwen2_5_VLForConditionalGeneration):
             **encode_kwargs,
         )
 
+        ### 归还 max_pixels，保证线程安全/复用安全。
         if max_pixels:
             self.processor.image_processor.max_pixels = default_max_pixels
 
