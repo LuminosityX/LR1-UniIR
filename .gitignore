@@ -167,3 +167,10 @@ cython_debug/
 #*.ipynb
 wandb/
 log.txt
+
+
+### hx specific
+*.npy
+*.index
+*.tsv
+*.txt

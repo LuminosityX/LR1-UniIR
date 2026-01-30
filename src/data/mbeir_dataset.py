@@ -99,7 +99,9 @@ class MBEIRDatasetBase(Dataset):
         """Load an image given a path"""
         if not query_img_path:
             return None
-        full_query_img_path = os.path.join(self.mbeir_data_dir, query_img_path)
+        ### 因为重新分了数据集，所以这里self.mbeir_data_dir要变一下
+        # full_query_img_path = os.path.join(self.mbeir_data_dir, query_img_path)
+        full_query_img_path = os.path.join("/data/M-BEIR/", query_img_path)
         assert os.path.exists(full_query_img_path), f"Image Path {full_query_img_path} does not exist"
         image = Image.open(full_query_img_path).convert("RGB")
         image = self.img_preprocess_fn(image)
@@ -234,7 +236,14 @@ class MBEIRMainDataset(MBEIRDatasetBase):
         # neg_cand_modality could be different from pos_cand_modality.
         ### 基于（数据集ID、查询模态、正例模态）键选取一条指令模板并拼接到查询文本前（若启用指令）
         query_prompt = self._get_random_query_prompt(query_dataset_id, query_modality, pos_cand_modality)
-        query_txt_with_prompt = format_string(f"{query_prompt} {query_txt}")
+        ### 检索意图的提示语需要重新构建
+        # query_txt_with_prompt = format_string(f"{query_prompt} {query_txt}")
+        if query_txt != "":
+            query_txt_with_prompt = format_string(f"Retrieval Intent: {query_prompt}\nQuery: {query_txt}")
+        else:
+            ### format_string 会在Query和图像之间多一个句号
+            query_txt_with_prompt = format_string(f"Retrieval Intent: {query_prompt}")
+            query_txt_with_prompt = query_txt_with_prompt + "\nQuery: "
         query_txt_without_prompt = format_string(query_txt)
 
         # Sample negative examples
@@ -308,6 +317,7 @@ class MBEIRMainDataset(MBEIRDatasetBase):
             if len(neg_cand_list) > 0:
                 instance.update({"neg_cand_list": neg_cand_list})
         ### 返回的instance里面文本还依旧只是字符串，图像是img_preprocess_fn处理后的。
+        ### cand_pool主要在训练中提供正负例，推理时不需要。
         return instance
 
 ### 推理专用数据集：MBEIRInferenceOnlyDataset
@@ -368,7 +378,9 @@ class MBEIRInferenceOnlyDataset(MBEIRDatasetBase):
         # Randomly sample a query prompt
         # Note:query_modality and cand_desired_modality should define the golden modalities of the current mbeir_entry task.
         query_prompt = self._get_random_query_prompt(query_dataset_id, query_modality, candidate_modality)
-        query_txt_with_prompt = format_string(f"{query_prompt} {query_txt}")
+        ### 检索意图的提示语需要重新构建
+        # query_txt_with_prompt = format_string(f"{query_prompt} {query_txt}")
+        query_txt_with_prompt = format_string(f"Retrieval Intent: {query_prompt}\nQuery: {query_txt}")
         query_txt_without_prompt = format_string(query_txt)
 
         def _prepare_data_dict(txt, img_path):

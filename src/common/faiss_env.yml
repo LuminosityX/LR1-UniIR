@@ -1,4 +1,4 @@
-name: faiss
+name: faiss-hx
 channels:
   - pytorch
 dependencies:

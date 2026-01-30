@@ -14,7 +14,8 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader
 from torch.nn.parallel import DistributedDataParallel as DDP
 import numpy as np
-from torch.cuda.amp import autocast
+# from torch.cuda.amp import autocast
+from torch.amp import autocast
 import transformers
 
 import dist_utils
@@ -50,9 +51,12 @@ def generate_embeds_and_ids_for_dataset_with_gather(model, data_loader, device, 
                 for k, v in value.items():
                     batch[key][k] = v.to(device)
         # Enable autocast to FP16
-        with autocast(enabled=use_fp16):
-            embeddings_batched, ids_list_batched = model(batch, encode_mbeir_batch=True)
+        with autocast(device_type="cuda", enabled=use_fp16):
+            embeddings_batched, ids_list_batched = model(encode_mbeir_batch=True, **batch)
 
+        ### embeddings_batched.shape [batch_size, 2048] len(ids_list_batched) = batch_size
+        ###  print(f"Batch embeddings shape: {embeddings_batched.shape}, Batch ids count: {len(ids_list_batched)}")
+        
         embedding_tensors.append(embeddings_batched.half())  # We only save FP16 embeddings to save space.
         id_list.extend(ids_list_batched)
 
@@ -136,7 +140,7 @@ def generate_embeds_and_ids_for_dataset_with_tmp_files(
         batch = {k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
 
         # Enable autocast to FP16
-        with autocast(enabled=use_fp16):
+        with autocast(device_type="cuda", enabled=use_fp16):
             embeddings_batched, hashed_ids_list_batched = model(batch, encode_mbeir_batch=True)
 
         embedding_tensors.append(embeddings_batched)
@@ -210,6 +214,7 @@ def generate_embeds_for_config(model, img_preprocess_fn, tokenizer, config):
     # Load the dataset splits to embed
     dataset_types = ["train", "val", "test"]
     for split_name in dataset_types:
+        ### query/test
         split_dir_name = getattr(data_config, f"{split_name}_dir_name")
         embed_dataset_config = getattr(embed_config, f"{split_name}_datasets_config", None)
         ### only embed if enabled (now is test split)
@@ -483,9 +488,10 @@ def main(config):
     tokenizer = model.get_tokenizer()
 
     # Enable distributed data parallel
+    ### inference时，不能使用DDP，因为没有梯度更新
     model = model.to(config.dist_config.gpu_id)
-    if config.dist_config.distributed_mode:
-        model = DDP(model, device_ids=[config.dist_config.gpu_id])
+    # if config.dist_config.distributed_mode:
+    #     model = DDP(model, device_ids=[config.dist_config.gpu_id])
     print(f"Model is set up on GPU {config.dist_config.gpu_id}.")
 
     # Generate embeddings
@@ -506,6 +512,11 @@ def parse_arguments():
 
 
 if __name__ == "__main__":
+
+    ### 解决 transformers tokenizers 并行警告问题
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    ###
+
     args = parse_arguments()
     config = OmegaConf.load(args.config_path)
 

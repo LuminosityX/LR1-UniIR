@@ -30,12 +30,119 @@ from data.preprocessing.utils import (
 import dist_utils
 from interactive_retriever import InteractiveRetriever
 
+### 将create_index函数改为CPU-only版本，使用IndexFlatIP + IDMap2结构进行索引构建，分批次加载embedding以节省内存。
+def create_index_cpu_flat(config):
+    """CPU-only FAISS indexing (recommended): build & save IndexFlatIP with IDMap2, batched."""
+    uniir_dir = config.uniir_dir
+    index_config = config.index_config
 
+    embed_dir_name = index_config.embed_dir_name
+    index_dir_name = index_config.index_dir_name
+    expt_dir_name = config.experiment.path_suffix
+
+    idx_cand_pools_config = index_config.cand_pools_config
+    assert idx_cand_pools_config.enable_idx, "Indexing is not enabled for candidate pool"
+
+    split_name = "cand_pool"
+    cand_pool_name_list = idx_cand_pools_config.cand_pools_name_to_idx
+
+    # You can expose this in your yaml:
+    # index_config.faiss_config.cpu_add_batch_size: 200000
+    bs = getattr(index_config.faiss_config, "cpu_add_batch_size", 200_000)
+
+    print("-" * 30)
+    print(f"[CPU] Split: {split_name}, Candidate pool to index: {cand_pool_name_list}")
+    print(f"[CPU] add batch size = {bs}")
+    print("-" * 30)
+
+    for cand_pool_name in cand_pool_name_list:
+        cand_pool_name = cand_pool_name.lower()
+
+        embed_data_file = f"mbeir_{cand_pool_name}_{split_name}_embed.npy"
+        embed_data_path = os.path.join(uniir_dir, embed_dir_name, expt_dir_name, split_name, embed_data_file)
+
+        embed_id_file = f"mbeir_{cand_pool_name}_{split_name}_ids.npy"
+        embed_id_path = os.path.join(uniir_dir, embed_dir_name, expt_dir_name, split_name, embed_id_file)
+
+        print(f"[CPU] Building index for:\n  emb: {embed_data_path}\n  ids: {embed_id_path}")
+
+        # mmap: do NOT load whole array into RAM
+        emb_mmap = np.load(embed_data_path, mmap_mode="r")
+        ids_mmap = np.load(embed_id_path, mmap_mode="r")
+
+        assert emb_mmap.ndim == 2, f"Embedding array must be 2D, got shape={emb_mmap.shape}"
+        N, d = emb_mmap.shape
+        print(f"[CPU] N={N}, dim={d}")
+
+        # Sanity: config dim check
+        faiss_config = index_config.faiss_config
+        assert faiss_config.dim == d, (
+            f"The dimension of the index ({faiss_config.dim}) does not match embedding dim ({d})!"
+        )
+
+        # IDs: ensure int64, unique
+        # (This check costs time for very large N; you can disable via config if needed.)
+        # _assert_unique_ids_int64(ids_mmap)
+
+        # Metric: with L2-normalization, IP == cosine similarity
+        metric = getattr(faiss, faiss_config.metric)
+        assert metric == faiss.METRIC_INNER_PRODUCT, "create_index_cpu_flat uses IndexFlatIP + L2 normalize; set faiss_config.metric=METRIC_INNER_PRODUCT."
+            
+        # Optional: check unique ids (memory friendly)
+        if getattr(faiss_config, "check_unique_ids", True):
+            s = np.sort(np.asarray(ids_mmap, dtype=np.int64))
+            if s.size >= 2 and np.any(s[1:] == s[:-1]):
+                raise AssertionError("Duplicate IDs detected in ids.npy")
+
+        # Build CPU index: FlatIP + IDMap2
+        base = faiss.IndexFlatIP(d)  # Flat exact search
+        index = faiss.IndexIDMap2(base)
+
+        print("[CPU] Adding vectors with IDs (batched)...")
+        for start in range(0, N, bs):
+            end = min(start + bs, N)
+            x = np.array(emb_mmap[start:end], dtype="float32", copy=True)
+            faiss.normalize_L2(x)
+
+            ids = np.array(ids_mmap[start:end], dtype="int64", copy=False)
+            index.add_with_ids(x, ids)
+
+            if (start // bs) % 10 == 0 or end == N:
+                print(f"[CPU]  added {end}/{N}")
+
+            # free per-batch
+            del x, ids
+
+        assert index.ntotal == N, f"[CPU] index.ntotal={index.ntotal} != N={N}"
+        print(f"[CPU] Done. index.ntotal={index.ntotal}")
+
+        # Save
+        index_path = os.path.join(
+            uniir_dir,
+            index_dir_name,
+            expt_dir_name,
+            split_name,
+            f"mbeir_{cand_pool_name}_{split_name}.index",
+        )
+        os.makedirs(os.path.dirname(index_path), exist_ok=True)
+        faiss.write_index(index, index_path)
+        print(f"[CPU] Index saved to: {index_path}")
+
+        # Cleanup
+        del emb_mmap, ids_mmap, base, index
+        gc.collect()
+
+### 这段代码用于把已生成的候选池向量（embeddings）构建成可快速检索的 FAISS 索引：先从磁盘读取每个 cand_pool 的 embedding（N×d）及其对应的唯一外部 ID（hashed_id），
+### 将向量做 L2 归一化以便在使用 Inner Product 时等价于余弦相似度；随后用 index_factory("IDMap,<idx_type>") 创建索引结构，
+### 其中 IDMap 保证检索返回的是你提供的真实样本 ID 而不是内部顺序号；再把 CPU 索引模板克隆到多张 GPU 上并以 shard=True 进行分片存储以节省显存，
+### 在 GPU 上调用 add_with_ids 高效完成建库；最后将 GPU 索引拷回 CPU 并写入磁盘，生成可复用的 .index 文件（后续检索可直接 read_index + search），并清理大对象与触发 GC 以避免多候选池循环构建时内存/显存累积。
 def create_index(config):
     """This script builds the faiss index for the embeddings generated"""
     uniir_dir = config.uniir_dir
     index_config = config.index_config
+    ### embed
     embed_dir_name = index_config.embed_dir_name
+    ### index
     index_dir_name = index_config.index_dir_name
     expt_dir_name = config.experiment.path_suffix
 
@@ -97,14 +204,19 @@ def create_index(config):
         print(f"Number of GPUs used for indexing: {ngpus}")
         co = faiss.GpuMultipleClonerOptions()
         co.shard = True
+        print("faiss.index_cpu_to_all_gpus")
         index_gpu = faiss.index_cpu_to_all_gpus(cpu_index, co=co, ngpu=ngpus)
 
+        print("faiss.add_with_ids")
         # Add data to the GPU index
         index_gpu.add_with_ids(embedding_list, hashed_id_list)
 
+        print("faiss.index_gpu_to_cpu")
+        ### 会在Union Pool上OOM
         # Transfer the GPU index back to the CPU for saving
         index_cpu = faiss.index_gpu_to_cpu(index_gpu)
 
+        print("Done")
         # Save the CPU index to disk
         index_path = os.path.join(
             uniir_dir,
@@ -394,6 +506,9 @@ def run_retrieval(config, query_embedder_config=None):
             qrel_name = qrel_name.lower()
 
             # Load qrels
+            ### qrel: dict，形如 qrel[qid] = [did1, did2, ...]
+            ### qid_to_taskid: dict，把 query 映射到 task id（MBEIR 多任务用）
+            ### 大白话：qrels 就是“标准答案”。比如 qid=123 的正确文档可能是 did=5、did=9
             qrel_path = os.path.join(qrel_dir, split, f"mbeir_{qrel_name}_{split}_qrels.txt")
             qrel, qid_to_taskid = load_qrel(qrel_path)
 
@@ -414,8 +529,12 @@ def run_retrieval(config, query_embedder_config=None):
             metric_recall_list = [metric for metric in metric_list if "recall" in metric.lower()]
 
             # Search the index
+            ### 取最大 k（比如最大是 10），检索一次拿到 top-10，后续 Recall@1/5/10 直接从 top-10 截取即可。
             k = max([int(metric.split("@")[1]) for metric in metric_recall_list])
             print(f"Retriever: Searching with k={k}")
+            ### batch_size=hashed_query_ids.shape[0]: 等于 query 数，意味着“基本只跑 1 个 batch”（因为一步就覆盖全部 query）。
+            ### retrieved_cand_dist: shape (num_queries, k)，相似度分数
+            ### retrieved_indices: shape (num_queries, k)，FAISS 返回的 doc IDs（这里是 hashed did）
             retrieved_cand_dist, retrieved_indices = search_index(
                 embed_query_path,
                 cand_index_path,
@@ -441,8 +560,10 @@ def run_retrieval(config, query_embedder_config=None):
                         doc_id = unhash_did(hashed_doc_id)
                         run_file_line = f"{qid} Q0 {doc_id} {rank} {score} {run_id} {task_id}\n"
                         run_file.write(run_file_line)
+            ### 大白话：run 文件就是“每个 query 的 top-k 排名列表”，以后你评测/复现实验不需要重新检索，只要读这个文件即可。
             print(f"Retriever: Run file saved to {run_file_path}")
 
+            ### 没看，没理解，应该没用到
             # Store raw retrieved candidates for downstream applications like UniRAG
             if retrieval_config.raw_retrieval:
                 queries_path = os.path.join(
@@ -474,11 +595,16 @@ def run_retrieval(config, query_embedder_config=None):
 
             # Compute Recall@k
             recall_values_by_task = defaultdict(lambda: defaultdict(list))
+            ### 对每个 query
             for i, retrieved_indices_for_qid in enumerate(retrieved_indices):
                 # Map the retrieved FAISS indices to the original mbeir_data_ids
+                ### 把 top-k 的 hashed did 全部还原成原始 did
                 retrieved_indices_for_qid = [unhash_did(idx) for idx in retrieved_indices_for_qid]
+                ### 还原 qid
                 qid = unhash_qid(hashed_query_ids[i])
+                ### 取标准答案 relevant docs
                 relevant_docs = qrel[qid]
+                ### 取 task_id
                 task_id = qid_to_taskid[qid]
 
                 # Compute Recall@k for each metric
@@ -504,6 +630,7 @@ def run_retrieval(config, query_embedder_config=None):
 
     # Creating a tsv file for the evaluation results
     # Sort data by TaskID, then by dataset_order, then by split_order matching the google sheets.
+    ### TODO: update dataset_order because we have new datasets
     dataset_order = {
         "visualnews_task0": 1,
         "mscoco_task0": 2,
@@ -736,6 +863,9 @@ def main():
 
     print(OmegaConf.to_yaml(config, sort_keys=False))
 
+    print(args.query_embedder_config_path)
+    print("args.query_embedder_config_path True" if args.query_embedder_config_path else "args.query_embedder_config_path False")
+
     interactive_retrieval = True if args.query_embedder_config_path else False
     if interactive_retrieval:
         query_embedder_config = OmegaConf.load(args.query_embedder_config_path)
@@ -751,10 +881,12 @@ def main():
         run_hard_negative_mining(config)
 
     if args.enable_create_index:
-        create_index(config)
+        # create_index(config)
+        create_index_cpu_flat(config)
 
     if args.enable_retrieval:
-        run_retrieval(config, query_embedder_config)
+        # run_retrieval(config, query_embedder_config)
+        run_retrieval(config, query_embedder_config if interactive_retrieval else None)
 
     # Destroy the process group
     if interactive_retrieval and query_embedder_config.dist_config.distributed_mode:

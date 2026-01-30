@@ -32,6 +32,21 @@ class PromptType(str, Enum):
 
 PREFIX_DICT = {"query": "Query", "passage": "Passage"}
 
+###
+class RawTextBatch:
+    """Wrapper to store raw text strings for later processing."""
+    def __init__(self, texts: List[str]):
+        self.texts = texts
+
+    def __len__(self):
+        return len(self.texts)
+
+    def __getitem__(self, idx):
+        if isinstance(idx, list):
+            return [self.texts[i] for i in idx]
+        return self.texts[idx]
+###
+
 
 class JinaEmbeddingsV4Processor(Qwen2_5_VLProcessor):
     def __init__(self, *args, **kwargs) -> None:
@@ -59,8 +74,10 @@ class JinaEmbeddingsV4Processor(Qwen2_5_VLProcessor):
         else:
             images = cast(List[Image.Image], images)
             text_doc = [
-                "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>Describe the image.<|im_end|>\n"
+                "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|><|im_end|>\n"
             ] * len(images)
+            # print(text_doc[0])
+            # assert 1==2
 
         # The following code is a hack to make sure the scatter in DDP is done correctly when training on multiple GPUs
         batch_doc = self(text=text_doc, images=images, padding="longest", return_tensors="pt")  # type: ignore
@@ -105,7 +122,10 @@ class JinaEmbeddingsV4Processor(Qwen2_5_VLProcessor):
 
         for text in texts:
             if prefix:
+                assert 1==2, "process_texts of Jina-v4 does not support prefix anymore."
                 text = f"{prefix}: {text}"
+            # print(text)
+            # assert 1==2
             padded_texts.append(text)
 
         text_batch = self(
@@ -151,9 +171,12 @@ class JinaEmbeddingsV4Processor(Qwen2_5_VLProcessor):
         text_prompts = []
         for text in texts:
             if prefix:
+                assert 1==2, "process_texts of Jina-v4 does not support prefix anymore."
                 text = f"{prefix}: {text}"
             # Format: image placeholder + text content
-            prompt = f"<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{text}<|im_end|>\n"
+            prompt = f"<|im_start|>user\n{text}<|vision_start|><|image_pad|><|vision_end|><|im_end|>\n"
+            # print(prompt)
+            # assert 1==2
             text_prompts.append(prompt)
 
         # Process with both text and images
@@ -290,28 +313,33 @@ class JinaEmbeddingsV4Model(Qwen2_5_VLForConditionalGeneration):
         """
         Get the single-vector embeddings from the hidden states.
         """
-        if self._input_has_image(input_ids[0]):  # got document image
-            img_start_positions = torch.where(
-                input_ids == self.config.vision_start_token_id
-            )[1]
-            img_end_positions = torch.where(
-                input_ids == self.config.vision_end_token_id
-            )[1]
+        # if self._input_has_image(input_ids[0]):  # got document image
+        #     img_start_positions = torch.where(
+        #         input_ids == self.config.vision_start_token_id
+        #     )[1]
+        #     img_end_positions = torch.where(
+        #         input_ids == self.config.vision_end_token_id
+        #     )[1]
 
-            batch_size, seq_len = input_ids.shape
-            position_indices = torch.arange(seq_len, device=input_ids.device).expand(
-                batch_size, -1
-            )
-            image_mask = (position_indices >= img_start_positions.unsqueeze(1)) & (
-                position_indices <= img_end_positions.unsqueeze(1)
-            )
+        #     batch_size, seq_len = input_ids.shape
+        #     position_indices = torch.arange(seq_len, device=input_ids.device).expand(
+        #         batch_size, -1
+        #     )
+        #     image_mask = (position_indices >= img_start_positions.unsqueeze(1)) & (
+        #         position_indices <= img_end_positions.unsqueeze(1)
+        #     )
 
-            masked_hidden_states = hidden_states * image_mask.unsqueeze(-1)
-            pooled_output = masked_hidden_states.sum(dim=1) / image_mask.sum(
-                dim=1, keepdim=True
-            )
-        else:  # got query text
-            pooled_output = torch.sum(
+        #     masked_hidden_states = hidden_states * image_mask.unsqueeze(-1)
+        #     pooled_output = masked_hidden_states.sum(dim=1) / image_mask.sum(
+        #         dim=1, keepdim=True
+        #     )
+        # else:  # got query text
+        #     pooled_output = torch.sum(
+        #         hidden_states * attention_mask.unsqueeze(-1), dim=1
+        #     ) / torch.sum(attention_mask, dim=1, keepdim=True)
+
+        ### 取消图像特殊处理，统一用attention_mask池化
+        pooled_output = torch.sum(
                 hidden_states * attention_mask.unsqueeze(-1), dim=1
             ) / torch.sum(attention_mask, dim=1, keepdim=True)
 
@@ -372,18 +400,19 @@ class JinaEmbeddingsV4Model(Qwen2_5_VLForConditionalGeneration):
         We return a simple wrapper class that stores raw strings for later
         processing by Jina V4's native process_texts() method.
         """
-        class RawTextBatch:
-            """Wrapper to store raw text strings for later processing."""
-            def __init__(self, texts: List[str]):
-                self.texts = texts
+        ### 内部类无法被pickle，需要定义在函数外部
+        # class RawTextBatch:
+        #     """Wrapper to store raw text strings for later processing."""
+        #     def __init__(self, texts: List[str]):
+        #         self.texts = texts
 
-            def __len__(self):
-                return len(self.texts)
+        #     def __len__(self):
+        #         return len(self.texts)
 
-            def __getitem__(self, idx):
-                if isinstance(idx, list):
-                    return [self.texts[i] for i in idx]
-                return self.texts[idx]
+        #     def __getitem__(self, idx):
+        #         if isinstance(idx, list):
+        #             return [self.texts[i] for i in idx]
+        #         return self.texts[idx]
 
         def passthrough_wrapper(texts: List[str]) -> RawTextBatch:
             return RawTextBatch(texts)
@@ -422,6 +451,7 @@ class JinaEmbeddingsV4Model(Qwen2_5_VLForConditionalGeneration):
 
         batch_size = image_batched.size(0)
         ### ？ 这里image_batched有放到cuda上吗？
+        ### 应该是放了的，autocast也是在cuda上
         device = image_batched.device
         task_label = getattr(self, 'mbeir_task_label', 'retrieval')
 

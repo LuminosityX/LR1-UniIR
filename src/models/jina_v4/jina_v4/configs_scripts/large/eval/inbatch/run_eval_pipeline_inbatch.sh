@@ -3,10 +3,10 @@
 set -e  # Exit immediately if a command exits with a non-zero status
 
 # Initialize Conda
-source /home/miniconda3/etc/profile.d/conda.sh # <--- Change this to the path of your conda.sh
+# source /opt/conda/etc/profile.d/conda.sh # <--- Change this to the path of your conda.sh
 
 # Path to the project directory
-HOME_DIR="xxx"
+HOME_DIR="/data/cys-hx/MMR-LR1" # <--- Change this to the path of your project directory
 
 # Path to the codebase and config file
 SRC="$HOME_DIR/LR1-UniIR/src"  # Absolute path to codebse /UniIR/src # <--- Change this to the path of your UniIR/src
@@ -15,8 +15,8 @@ SRC="$HOME_DIR/LR1-UniIR/src"  # Absolute path to codebse /UniIR/src # <--- Chan
 COMMON_DIR="$SRC/common"
 
 # Path to MBEIR data and UniIR directory where we store the checkpoints, embeddings, etc.
-UNIIR_DIR="/data/UniIR/" # <--- Change this to the UniIR directory
-MBEIR_DATA_DIR="xxx" # <--- Change this to the MBEIR data directory you download from HF page
+UNIIR_DIR="/data/cys-hx/MMR-LR1/LR1-UniIR/data/hxli/" # <--- Change this to the UniIR directory
+MBEIR_DATA_DIR="/data/M-BEIR/sub_MBEIR/" # <--- Change this to the MBEIR data directory you download from HF page
 
 # Path to config dir
 # MODEL="uniir_blip/blip_featurefusion"  # <--- Change this to the model you want to run
@@ -28,7 +28,7 @@ EXP_NAME="inbatch"
 CONFIG_DIR="$MODEL_DIR/configs_scripts/$SIZE/$MODE/$EXP_NAME"
 
 # Set CUDA devices and PYTHONPATH
-export CUDA_VISIBLE_DEVICES=0,1  # <--- Change this to the CUDA devices you want to use
+export CUDA_VISIBLE_DEVICES=6,7  # <--- Change this to the CUDA devices you want to use
 NPROC=2 # <--- Change this to the number of GPUs you want to use
 export PYTHONPATH=$SRC
 echo "PYTHONPATH: $PYTHONPATH"
@@ -39,7 +39,7 @@ cd $COMMON_DIR
 
 # Activate conda environment
 # conda activate blip
-conda activate xxx # <--- Change this to the name of your conda environment
+# conda activate jina-hx # <--- Change this to the name of your conda environment
 
 # Run Embedding command
 CONFIG_PATH="$CONFIG_DIR/embed.yaml"
@@ -50,12 +50,49 @@ echo "SCRIPT_NAME: $SCRIPT_NAME"
 ### this python code is to do the following yaml updates:
 ### yaml_data["experiment"]["instruct_status"] = "Instruct"
 ### yaml_data["data_config"]["enable_query_instruct"] = True
+# python config_updater.py \
+#     --update_mbeir_yaml_instruct_status \
+#     --mbeir_yaml_file_path $CONFIG_PATH \
+#     --enable_instruct True
+
+# python -m torch.distributed.run --nproc_per_node=$NPROC $SCRIPT_NAME \
+#     --config_path "$CONFIG_PATH" \
+#     --uniir_dir "$UNIIR_DIR" \
+#     --mbeir_data_dir "$MBEIR_DATA_DIR"
+
+# Activate faiss environment
+# conda activate faiss # <--- Change this to the name of your conda environment
+
+# Run Index command
+# CONFIG_PATH="$CONFIG_DIR/index.yaml"
+# SCRIPT_NAME="mbeir_retriever.py"
+# echo "CONFIG_PATH: $CONFIG_PATH"
+# echo "SCRIPT_NAME: $SCRIPT_NAME"
+
+# python config_updater.py \
+#     --update_mbeir_yaml_instruct_status \
+#     --mbeir_yaml_file_path $CONFIG_PATH \
+#     --enable_instruct True
+
+# python -u $SCRIPT_NAME \
+#     --config_path "$CONFIG_PATH" \
+#     --uniir_dir "$UNIIR_DIR" \
+#     --mbeir_data_dir "$MBEIR_DATA_DIR" \
+#     --enable_create_index
+
+# # Run retrieval command
+CONFIG_PATH="$CONFIG_DIR/retrieval.yaml"
+SCRIPT_NAME="mbeir_retriever.py"
+echo "CONFIG_PATH: $CONFIG_PATH"
+echo "SCRIPT_NAME: $SCRIPT_NAME"
+
 python config_updater.py \
     --update_mbeir_yaml_instruct_status \
     --mbeir_yaml_file_path $CONFIG_PATH \
     --enable_instruct True
 
-python -m torch.distributed.run --nproc_per_node=$NPROC $SCRIPT_NAME \
+python $SCRIPT_NAME \
     --config_path "$CONFIG_PATH" \
     --uniir_dir "$UNIIR_DIR" \
-    --mbeir_data_dir "$MBEIR_DATA_DIR"
+    --mbeir_data_dir "$MBEIR_DATA_DIR" \
+    --enable_retrieval

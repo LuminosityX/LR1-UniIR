@@ -156,6 +156,8 @@ def build_model_from_config(config):
             model_config.original_model_name,
             trust_remote_code=True,
             torch_dtype=torch.float16,
+            ### 原来是flash attention，这里改回sdpa，懒得下载flash attention了
+            attn_implementation="sdpa",
         )
 
         # Set MBEIR-specific attributes
