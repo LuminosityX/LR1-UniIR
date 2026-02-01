@@ -30,11 +30,12 @@ from data.mbeir_data_utils import (
     build_distributed_sampler_list,
     build_dataloader_list,
 )
-from models.uniir_blip.backbone.blip import load_checkpoint
-from models.uniir_blip.blip_featurefusion.blip_ff import blip_ff
-from models.uniir_blip.blip_scorefusion.blip_sf import blip_sf
-from models.uniir_blip.engine import train_one_epoch, eval_engine
-import models.uniir_blip.utils as utils
+
+from models.jina_v4.engine import train_one_epoch, eval_engine
+import models.jina_v4.utils as utils
+
+from models.jina_v4.jina_v4.modeling_jina_embeddings_v4 import JinaEmbeddingsV4Model
+
 
 # Set up logger
 logger = logging.getLogger()
@@ -45,7 +46,7 @@ def set_seed(seed):
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-
+#### 换了模型，需要考虑修改这里的代码
 def save_checkpoint(model, optimizer, scheduler, epoch, scaler, config):
     ckpt_config = config.model.ckpt_config
     model_name = config.model.short_name.lower()
@@ -62,6 +63,39 @@ def save_checkpoint(model, optimizer, scheduler, epoch, scaler, config):
     os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
     torch.save(save_obj, checkpoint_path)
     print(f"Saved checkpoint to {checkpoint_path}")
+
+
+def load_checkpoint(model, url_or_filename):
+    ### 从/src/models/uniir_blip/backbone/blip.py 复制来的，需要写Jinav4的版本
+    # if is_url(url_or_filename):
+    #     # use a single process to avoid unnecessary download
+    #     cached_file = download_cached_file(url_or_filename, check_hash=False, progress=True)
+    #     checkpoint = torch.load(cached_file, map_location="cpu")
+    # elif os.path.isfile(url_or_filename):
+    #     checkpoint = torch.load(url_or_filename, map_location="cpu")
+    # else:
+    #     raise RuntimeError("checkpoint url or path is invalid")
+
+    # state_dict = checkpoint["model"]
+
+    # state_dict["visual_encoder.pos_embed"] = interpolate_pos_embed(
+    #     state_dict["visual_encoder.pos_embed"], model.visual_encoder
+    # )
+    # if "visual_encoder_m.pos_embed" in model.state_dict().keys():
+    #     state_dict["visual_encoder_m.pos_embed"] = interpolate_pos_embed(
+    #         state_dict["visual_encoder_m.pos_embed"], model.visual_encoder_m
+    #     )
+    # for key in model.state_dict().keys():
+    #     if key in state_dict.keys():
+    #         if state_dict[key].shape != model.state_dict()[key].shape:
+    #             del state_dict[key]
+
+    # msg = model.load_state_dict(state_dict, strict=False)
+    # print("load checkpoint from %s" % url_or_filename)
+    # return model, msg
+
+    raise NotImplementedError("load_checkpoint is not implemented yet for JinaEmbeddingsV4Model")
+    return
 
 
 def log_results(train_stats, val_stats, test_stats, epoch=None, best_epoch=None):
@@ -176,23 +210,14 @@ def main(config):
     print("Creating Jina V4 model...")
     model_config = config.model
     ckpt_config = model_config.ckpt_config
-    if model_config.name == "Jina V4":
+    if model_config.name == "JinaEmbeddingsV4Model":
         #### 待修改
-        model = blip_ff(
-            pretrained=ckpt_config.pretrained_blip_url,  # This always saved to cache
-            ### 224
-            image_size=model_config.image_size,
-            ### large
-            vit=model_config.vit,
-            ### True，开启梯度检查点，显著节省显存（以算力换显存），训练略变慢。
-            vit_grad_ckpt=model_config.vit_grad_ckpt,
-            ### 对 ViT 前 12 层或指定段落启用检查点（具体取决于实现）。可微调该值来平衡显存/速度。
-            vit_ckpt_layer=model_config.vit_ckpt_layer,
-            ### 768
-            embed_dim=model_config.embed_dim,
-            ### 57960
-            queue_size=model_config.queue_size,
-            config=model_config,
+        model = JinaEmbeddingsV4Model.from_pretrained(
+            model_config.ckpt_config.pretrained_url,
+            trust_remote_code=True,
+            torch_dtype=torch.float16,
+            ### 原来是flash attention，这里改回sdpa，懒得下载flash attention了
+            attn_implementation="sdpa",
         )
     else:
         raise NotImplementedError(f"Model {config.model} not implemented")
@@ -301,6 +326,8 @@ def main(config):
     scheduler = CosineAnnealingLR(optimizer, T_max=t_total, eta_min=0)
 
     epoch = 0
+
+    #### 换了模型，需要考虑修改这里的代码
     if ckpt_config.resume_training:
         scheduler.load_state_dict(checkpoint["scheduler"])
         epoch = checkpoint["epoch"] + 1

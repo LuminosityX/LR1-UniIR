@@ -3,7 +3,7 @@ from torch.cuda.amp import autocast
 import transformers
 
 
-from models.uniir_blip import utils
+from models.jina_v4 import utils
 
 
 def train_one_epoch(model, data_loader, optimizer, epoch, gpu_id, scheduler, global_step, scaler, config):
